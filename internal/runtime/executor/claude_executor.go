@@ -131,7 +131,13 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	body = disableThinkingIfToolChoiceForced(body)
 
 	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
-	if countCacheControls(body) == 0 {
+	if noToolsCacheControl(auth) {
+		body = stripToolsCacheControl(body)
+		if countCacheControls(body) == 0 {
+			body = injectSystemCacheControl(body)
+			body = injectMessagesCacheControl(body)
+		}
+	} else if countCacheControls(body) == 0 {
 		body = ensureCacheControl(body)
 	}
 
@@ -272,7 +278,13 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	body = disableThinkingIfToolChoiceForced(body)
 
 	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
-	if countCacheControls(body) == 0 {
+	if noToolsCacheControl(auth) {
+		body = stripToolsCacheControl(body)
+		if countCacheControls(body) == 0 {
+			body = injectSystemCacheControl(body)
+			body = injectMessagesCacheControl(body)
+		}
+	} else if countCacheControls(body) == 0 {
 		body = ensureCacheControl(body)
 	}
 
@@ -1377,6 +1389,34 @@ func injectToolsCacheControl(payload []byte) []byte {
 	}
 
 	return result
+}
+
+// noToolsCacheControl checks whether this auth has no-tools-cache-control enabled.
+func noToolsCacheControl(auth *cliproxyauth.Auth) bool {
+	return auth != nil && auth.Attributes != nil &&
+		strings.EqualFold(strings.TrimSpace(auth.Attributes["no_tools_cache_control"]), "true")
+}
+
+// stripToolsCacheControl removes cache_control from ALL tools in the tools array.
+func stripToolsCacheControl(payload []byte) []byte {
+	tools := gjson.GetBytes(payload, "tools")
+	if !tools.Exists() || !tools.IsArray() {
+		return payload
+	}
+
+	idx := 0
+	tools.ForEach(func(_, tool gjson.Result) bool {
+		if tool.Get("cache_control").Exists() {
+			path := fmt.Sprintf("tools.%d.cache_control", idx)
+			if updated, err := sjson.DeleteBytes(payload, path); err == nil {
+				payload = updated
+			}
+		}
+		idx++
+		return true
+	})
+
+	return payload
 }
 
 // injectSystemCacheControl adds cache_control to the last element in the system prompt.

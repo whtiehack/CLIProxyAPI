@@ -271,13 +271,16 @@ func (h *Handler) PutClaudeKeys(c *gin.Context) {
 }
 func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	type claudeKeyPatch struct {
-		APIKey         *string               `json:"api-key"`
-		Prefix         *string               `json:"prefix"`
-		BaseURL        *string               `json:"base-url"`
-		ProxyURL       *string               `json:"proxy-url"`
-		Models         *[]config.ClaudeModel `json:"models"`
-		Headers        *map[string]string    `json:"headers"`
-		ExcludedModels *[]string             `json:"excluded-models"`
+		APIKey              *string               `json:"api-key"`
+		Priority            *int                  `json:"priority"`
+		Prefix              *string               `json:"prefix"`
+		BaseURL             *string               `json:"base-url"`
+		ProxyURL            *string               `json:"proxy-url"`
+		Models              *[]config.ClaudeModel `json:"models"`
+		Headers             *map[string]string    `json:"headers"`
+		ExcludedModels      *[]string             `json:"excluded-models"`
+		Cloak               *config.CloakConfig   `json:"cloak"`
+		NoToolsCacheControl *bool                 `json:"no-tools-cache-control"`
 	}
 	var body struct {
 		Index *int            `json:"index"`
@@ -327,6 +330,15 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	}
 	if body.Value.ExcludedModels != nil {
 		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
+	}
+	if body.Value.Priority != nil {
+		entry.Priority = *body.Value.Priority
+	}
+	if body.Value.Cloak != nil {
+		entry.Cloak = body.Value.Cloak
+	}
+	if body.Value.NoToolsCacheControl != nil {
+		entry.NoToolsCacheControl = *body.Value.NoToolsCacheControl
 	}
 	normalizeClaudeKey(&entry)
 	h.cfg.ClaudeKey[targetIndex] = entry

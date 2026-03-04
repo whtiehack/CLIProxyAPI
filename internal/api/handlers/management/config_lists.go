@@ -262,7 +262,24 @@ func (h *Handler) PutClaudeKeys(c *gin.Context) {
 		}
 		arr = obj.Items
 	}
+	// Build lookup of existing keys to preserve Fork-added fields
+	// when the incoming entry doesn't include them (e.g., management panel).
+	existing := make(map[string]*config.ClaudeKey, len(h.cfg.ClaudeKey))
+	for i := range h.cfg.ClaudeKey {
+		existing[h.cfg.ClaudeKey[i].APIKey] = &h.cfg.ClaudeKey[i]
+	}
 	for i := range arr {
+		if old, ok := existing[arr[i].APIKey]; ok {
+			if !arr[i].NoToolsCacheControl && old.NoToolsCacheControl {
+				arr[i].NoToolsCacheControl = old.NoToolsCacheControl
+			}
+			if arr[i].Priority == 0 && old.Priority != 0 {
+				arr[i].Priority = old.Priority
+			}
+			if arr[i].Cloak == nil && old.Cloak != nil {
+				arr[i].Cloak = old.Cloak
+			}
+		}
 		normalizeClaudeKey(&arr[i])
 	}
 	h.cfg.ClaudeKey = arr

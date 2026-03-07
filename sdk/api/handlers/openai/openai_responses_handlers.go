@@ -11,6 +11,9 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	. "github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
@@ -20,6 +23,46 @@ import (
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+// promptCachePin stores a pinned auth ID with expiry for session affinity.
+type promptCachePin struct {
+	authID    string
+	expiresAt time.Time
+}
+
+const promptCachePinTTL = 30 * time.Minute
+
+var promptCacheAuthPins sync.Map // prompt_cache_key (string) → *promptCachePin
+
+// applyPromptCacheAuthPinning injects session-affinity into the context based on prompt_cache_key.
+// Same prompt_cache_key reuses the same auth (API key) within the TTL window.
+func applyPromptCacheAuthPinning(cliCtx context.Context, rawJSON []byte) context.Context {
+	promptCacheKey := strings.TrimSpace(gjson.GetBytes(rawJSON, "prompt_cache_key").String())
+	if promptCacheKey == "" {
+		return cliCtx
+	}
+
+	// Look up existing pinning
+	if val, ok := promptCacheAuthPins.Load(promptCacheKey); ok {
+		pin := val.(*promptCachePin)
+		if time.Now().Before(pin.expiresAt) {
+			return handlers.WithPinnedAuthID(cliCtx, pin.authID)
+		}
+		promptCacheAuthPins.Delete(promptCacheKey)
+	}
+
+	// First request with this cache key: capture the selected auth ID for future reuse
+	return handlers.WithSelectedAuthIDCallback(cliCtx, func(authID string) {
+		authID = strings.TrimSpace(authID)
+		if authID == "" {
+			return
+		}
+		promptCacheAuthPins.Store(promptCacheKey, &promptCachePin{
+			authID:    authID,
+			expiresAt: time.Now().Add(promptCachePinTTL),
+		})
+	})
+}
 
 // OpenAIResponsesAPIHandler contains the handlers for OpenAIResponses API endpoints.
 // It holds a pool of clients to interact with the backend service.
@@ -123,6 +166,7 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 	c.Header("Content-Type", "application/json")
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	cliCtx = applyPromptCacheAuthPinning(cliCtx, rawJSON)
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "responses/compact")
 	stopKeepAlive()
@@ -148,6 +192,7 @@ func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, r
 
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	cliCtx = applyPromptCacheAuthPinning(cliCtx, rawJSON)
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 
 	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
@@ -185,6 +230,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 	// New core execution path
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	cliCtx = applyPromptCacheAuthPinning(cliCtx, rawJSON)
 	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
 
 	setSSEHeaders := func() {

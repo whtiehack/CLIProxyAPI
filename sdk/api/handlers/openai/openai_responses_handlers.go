@@ -24,43 +24,106 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// promptCachePin stores a pinned auth ID with expiry for session affinity.
+// ---------- prompt_cache_key session affinity ----------
+
+const (
+	promptCachePinTTL = 30 * time.Minute
+	pinStoreGCInterval = 5 * time.Minute
+)
+
 type promptCachePin struct {
 	authID    string
 	expiresAt time.Time
 }
 
-const promptCachePinTTL = 30 * time.Minute
+type promptCachePinStore struct {
+	mu     sync.RWMutex
+	pins   map[string]promptCachePin
+	lastGC time.Time
+}
 
-var promptCacheAuthPins sync.Map // prompt_cache_key (string) → *promptCachePin
+var pinStore = &promptCachePinStore{
+	pins: make(map[string]promptCachePin),
+}
 
-// applyPromptCacheAuthPinning injects session-affinity into the context based on prompt_cache_key.
-// Same prompt_cache_key reuses the same auth (API key) within the TTL window.
+func (s *promptCachePinStore) get(key string) (string, bool) {
+	s.mu.RLock()
+	pin, ok := s.pins[key]
+	s.mu.RUnlock()
+	if !ok || time.Now().After(pin.expiresAt) {
+		return "", false
+	}
+	return pin.authID, true
+}
+
+func (s *promptCachePinStore) set(key, authID string) {
+	s.mu.Lock()
+	s.pins[key] = promptCachePin{
+		authID:    authID,
+		expiresAt: time.Now().Add(promptCachePinTTL),
+	}
+	if now := time.Now(); now.Sub(s.lastGC) >= pinStoreGCInterval {
+		for k, pin := range s.pins {
+			if now.After(pin.expiresAt) {
+				delete(s.pins, k)
+			}
+		}
+		s.lastGC = now
+	}
+	s.mu.Unlock()
+}
+
+// computeFingerprint derives a fallback pin key from the client API key.
+func computeFingerprint(ctx context.Context) string {
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil {
+		return ""
+	}
+	if v, exists := ginCtx.Get("apiKey"); exists {
+		if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+			return "fp:" + s
+		}
+	}
+	return ""
+}
+
+// applyPromptCacheAuthPinning injects session-affinity into the context.
+// Pin key priority: prompt_cache_key (body) → fingerprint (client apiKey).
+// When prompt_cache_key first appears and a fingerprint pin already exists,
+// the pin is migrated to prompt_cache_key so subsequent requests hit directly.
 func applyPromptCacheAuthPinning(cliCtx context.Context, rawJSON []byte) context.Context {
 	promptCacheKey := strings.TrimSpace(gjson.GetBytes(rawJSON, "prompt_cache_key").String())
-	if promptCacheKey == "" {
+	fingerprint := computeFingerprint(cliCtx)
+
+	// 1. prompt_cache_key has a pin → use it
+	if promptCacheKey != "" {
+		if authID, ok := pinStore.get(promptCacheKey); ok {
+			return handlers.WithPinnedAuthID(cliCtx, authID)
+		}
+	}
+
+	// 2. fingerprint has a pin → use it (migrate to prompt_cache_key if available)
+	if fingerprint != "" {
+		if authID, ok := pinStore.get(fingerprint); ok {
+			if promptCacheKey != "" {
+				pinStore.set(promptCacheKey, authID)
+			}
+			return handlers.WithPinnedAuthID(cliCtx, authID)
+		}
+	}
+
+	// 3. No pin exists → first request, capture auth via callback
+	storeKey := promptCacheKey
+	if storeKey == "" {
+		storeKey = fingerprint
+	}
+	if storeKey == "" {
 		return cliCtx
 	}
-
-	// Look up existing pinning
-	if val, ok := promptCacheAuthPins.Load(promptCacheKey); ok {
-		pin := val.(*promptCachePin)
-		if time.Now().Before(pin.expiresAt) {
-			return handlers.WithPinnedAuthID(cliCtx, pin.authID)
-		}
-		promptCacheAuthPins.Delete(promptCacheKey)
-	}
-
-	// First request with this cache key: capture the selected auth ID for future reuse
 	return handlers.WithSelectedAuthIDCallback(cliCtx, func(authID string) {
-		authID = strings.TrimSpace(authID)
-		if authID == "" {
-			return
+		if authID = strings.TrimSpace(authID); authID != "" {
+			pinStore.set(storeKey, authID)
 		}
-		promptCacheAuthPins.Store(promptCacheKey, &promptCachePin{
-			authID:    authID,
-			expiresAt: time.Now().Add(promptCachePinTTL),
-		})
 	})
 }
 

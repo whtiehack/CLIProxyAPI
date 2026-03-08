@@ -13,7 +13,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -30,11 +29,9 @@ import (
 // ---------- prompt_cache_key session affinity ----------
 
 const (
-	promptCachePinTTL  = 30 * time.Minute
+	promptCachePinTTL = 30 * time.Minute
 	pinStoreGCInterval = 5 * time.Minute
 )
-
-var zcCanaryRe = regexp.MustCompile(`(?s)<!-- ZC_CANARY_START -->.*?<!-- ZC_CANARY_END -->`)
 
 type promptCachePin struct {
 	authID    string
@@ -103,7 +100,6 @@ func computeFingerprint(ctx context.Context, rawJSON []byte) string {
 	if firstMsg == "" {
 		return "fp:" + apiKey
 	}
-	firstMsg = zcCanaryRe.ReplaceAllString(firstMsg, "")
 	h := sha256.Sum256([]byte(firstMsg))
 	return "fp:" + apiKey + ":" + hex.EncodeToString(h[:8])
 }

@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
 	"strings"
 	"time"
 
@@ -36,8 +35,6 @@ const (
 )
 
 var dataTag = []byte("data:")
-
-var zcCanaryRe = regexp.MustCompile(`(?s)<!-- ZC_CANARY_START -->.*?<!-- ZC_CANARY_END -->`)
 
 // CodexExecutor is a stateless executor for Codex (OpenAI Responses API entrypoint).
 // If api_key is unavailable on auth, it falls back to legacy via ClientAdapter.
@@ -625,7 +622,6 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 		if apiKey := strings.TrimSpace(apiKeyFromContext(ctx)); apiKey != "" {
 			seed := "cli-proxy-api:codex:prompt-cache:" + apiKey
 			if firstMsg := gjson.GetBytes(req.Payload, "messages.0.content").String(); firstMsg != "" {
-				firstMsg = zcCanaryRe.ReplaceAllString(firstMsg, "")
 				h := sha256.Sum256([]byte(firstMsg))
 				seed += ":" + hex.EncodeToString(h[:8])
 			}

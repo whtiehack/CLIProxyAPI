@@ -108,24 +108,41 @@ func computeFingerprint(ctx context.Context, rawJSON []byte) string {
 // Pin key priority: prompt_cache_key (body) → fingerprint (client apiKey).
 // When prompt_cache_key first appears and a fingerprint pin already exists,
 // the pin is migrated to prompt_cache_key so subsequent requests hit directly.
+// A callback is always attached so that if the pinned auth fails and the
+// conductor falls back to another auth, the pin is updated automatically.
 func applyPromptCacheAuthPinning(cliCtx context.Context, rawJSON []byte) context.Context {
 	promptCacheKey := strings.TrimSpace(gjson.GetBytes(rawJSON, "prompt_cache_key").String())
 	fingerprint := computeFingerprint(cliCtx, rawJSON)
 
+	// updateCallback returns a callback that updates the pin when a different auth is selected (fallback).
+	updateCallback := func(storeKey, currentAuthID string) func(string) {
+		return func(newAuthID string) {
+			if newAuthID = strings.TrimSpace(newAuthID); newAuthID != "" && newAuthID != currentAuthID {
+				pinStore.set(storeKey, newAuthID)
+			}
+		}
+	}
+
 	// 1. prompt_cache_key has a pin → use it
 	if promptCacheKey != "" {
 		if authID, ok := pinStore.get(promptCacheKey); ok {
-			return handlers.WithPinnedAuthID(cliCtx, authID)
+			cliCtx = handlers.WithPinnedAuthID(cliCtx, authID)
+			cliCtx = handlers.WithSelectedAuthIDCallback(cliCtx, updateCallback(promptCacheKey, authID))
+			return cliCtx
 		}
 	}
 
 	// 2. fingerprint has a pin → use it (migrate to prompt_cache_key if available)
 	if fingerprint != "" {
 		if authID, ok := pinStore.get(fingerprint); ok {
+			storeKey := fingerprint
 			if promptCacheKey != "" {
 				pinStore.set(promptCacheKey, authID)
+				storeKey = promptCacheKey
 			}
-			return handlers.WithPinnedAuthID(cliCtx, authID)
+			cliCtx = handlers.WithPinnedAuthID(cliCtx, authID)
+			cliCtx = handlers.WithSelectedAuthIDCallback(cliCtx, updateCallback(storeKey, authID))
+			return cliCtx
 		}
 	}
 

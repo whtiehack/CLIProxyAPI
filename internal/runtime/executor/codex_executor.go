@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -618,7 +620,12 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 		}
 	} else if from == "openai" {
 		if apiKey := strings.TrimSpace(apiKeyFromContext(ctx)); apiKey != "" {
-			cache.ID = uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:prompt-cache:"+apiKey)).String()
+			seed := "cli-proxy-api:codex:prompt-cache:" + apiKey
+			if firstMsg := gjson.GetBytes(req.Payload, "messages.0.content").String(); firstMsg != "" {
+				h := sha256.Sum256([]byte(firstMsg))
+				seed += ":" + hex.EncodeToString(h[:8])
+			}
+			cache.ID = uuid.NewSHA1(uuid.NameSpaceOID, []byte(seed)).String()
 		}
 	}
 

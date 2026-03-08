@@ -9,6 +9,8 @@ package openai
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"strings"
@@ -73,18 +75,33 @@ func (s *promptCachePinStore) set(key, authID string) {
 	s.mu.Unlock()
 }
 
-// computeFingerprint derives a fallback pin key from the client API key.
-func computeFingerprint(ctx context.Context) string {
+// computeFingerprint derives a fallback pin key from the client API key
+// and the first message content hash for per-conversation granularity.
+func computeFingerprint(ctx context.Context, rawJSON []byte) string {
 	ginCtx, ok := ctx.Value("gin").(*gin.Context)
 	if !ok || ginCtx == nil {
 		return ""
 	}
+	var apiKey string
 	if v, exists := ginCtx.Get("apiKey"); exists {
-		if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
-			return "fp:" + s
+		if s, ok := v.(string); ok {
+			apiKey = strings.TrimSpace(s)
 		}
 	}
-	return ""
+	if apiKey == "" {
+		return ""
+	}
+
+	// Try first message content for finer granularity
+	firstMsg := gjson.GetBytes(rawJSON, "messages.0.content").String() // chat completions
+	if firstMsg == "" {
+		firstMsg = gjson.GetBytes(rawJSON, "input.0.content").String() // responses format
+	}
+	if firstMsg == "" {
+		return "fp:" + apiKey
+	}
+	h := sha256.Sum256([]byte(firstMsg))
+	return "fp:" + apiKey + ":" + hex.EncodeToString(h[:8])
 }
 
 // applyPromptCacheAuthPinning injects session-affinity into the context.
@@ -93,7 +110,7 @@ func computeFingerprint(ctx context.Context) string {
 // the pin is migrated to prompt_cache_key so subsequent requests hit directly.
 func applyPromptCacheAuthPinning(cliCtx context.Context, rawJSON []byte) context.Context {
 	promptCacheKey := strings.TrimSpace(gjson.GetBytes(rawJSON, "prompt_cache_key").String())
-	fingerprint := computeFingerprint(cliCtx)
+	fingerprint := computeFingerprint(cliCtx, rawJSON)
 
 	// 1. prompt_cache_key has a pin → use it
 	if promptCacheKey != "" {

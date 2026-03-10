@@ -50,3 +50,4 @@ _bmad-output/*
 .DS_Store
 ._*
 cliproxyapi-linux-amd64
+.ace-tool/

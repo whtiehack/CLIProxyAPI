@@ -29,7 +29,7 @@ import (
 // ---------- prompt_cache_key session affinity ----------
 
 const (
-	promptCachePinTTL = 30 * time.Minute
+	promptCachePinTTL  = 30 * time.Minute
 	pinStoreGCInterval = 5 * time.Minute
 )
 
@@ -75,8 +75,24 @@ func (s *promptCachePinStore) set(key, authID string) {
 	s.mu.Unlock()
 }
 
-// computeFingerprint derives a fallback pin key from the client API key
-// and the first message content hash for per-conversation granularity.
+func modelAffinityKey(rawJSON []byte) string {
+	return strings.TrimSpace(gjson.GetBytes(rawJSON, "model").String())
+}
+
+func scopedPromptCachePinKey(promptCacheKey string, rawJSON []byte) string {
+	promptCacheKey = strings.TrimSpace(promptCacheKey)
+	if promptCacheKey == "" {
+		return ""
+	}
+	modelKey := modelAffinityKey(rawJSON)
+	if modelKey == "" {
+		return "pc:" + promptCacheKey
+	}
+	return "pc:" + modelKey + ":" + promptCacheKey
+}
+
+// computeFingerprint derives a fallback pin key from the client API key,
+// requested model, and the first message content hash for per-conversation granularity.
 func computeFingerprint(ctx context.Context, rawJSON []byte) string {
 	ginCtx, ok := ctx.Value("gin").(*gin.Context)
 	if !ok || ginCtx == nil {
@@ -91,6 +107,7 @@ func computeFingerprint(ctx context.Context, rawJSON []byte) string {
 	if apiKey == "" {
 		return ""
 	}
+	modelKey := modelAffinityKey(rawJSON)
 
 	// Try first message content for finer granularity
 	firstMsg := gjson.GetBytes(rawJSON, "messages.0.content").String() // chat completions
@@ -98,10 +115,16 @@ func computeFingerprint(ctx context.Context, rawJSON []byte) string {
 		firstMsg = gjson.GetBytes(rawJSON, "input.0.content").String() // responses format
 	}
 	if firstMsg == "" {
-		return "fp:" + apiKey
+		if modelKey == "" {
+			return "fp:" + apiKey
+		}
+		return "fp:" + apiKey + ":" + modelKey
 	}
 	h := sha256.Sum256([]byte(firstMsg))
-	return "fp:" + apiKey + ":" + hex.EncodeToString(h[:8])
+	if modelKey == "" {
+		return "fp:" + apiKey + ":" + hex.EncodeToString(h[:8])
+	}
+	return "fp:" + apiKey + ":" + modelKey + ":" + hex.EncodeToString(h[:8])
 }
 
 // applyPromptCacheAuthPinning injects session-affinity into the context.
@@ -111,7 +134,7 @@ func computeFingerprint(ctx context.Context, rawJSON []byte) string {
 // A callback is always attached so that if the pinned auth fails and the
 // conductor falls back to another auth, the pin is updated automatically.
 func applyPromptCacheAuthPinning(cliCtx context.Context, rawJSON []byte) context.Context {
-	promptCacheKey := strings.TrimSpace(gjson.GetBytes(rawJSON, "prompt_cache_key").String())
+	promptCacheKey := scopedPromptCachePinKey(gjson.GetBytes(rawJSON, "prompt_cache_key").String(), rawJSON)
 	fingerprint := computeFingerprint(cliCtx, rawJSON)
 
 	// updateCallback returns a callback that updates the pin when a different auth is selected (fallback).

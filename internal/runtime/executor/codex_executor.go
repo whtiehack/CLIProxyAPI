@@ -621,6 +621,9 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 	} else if from == "openai" {
 		if apiKey := strings.TrimSpace(apiKeyFromContext(ctx)); apiKey != "" {
 			seed := "cli-proxy-api:codex:prompt-cache:" + apiKey
+			if modelKey := strings.TrimSpace(req.Model); modelKey != "" {
+				seed += ":" + modelKey
+			}
 			if firstMsg := gjson.GetBytes(req.Payload, "messages.0.content").String(); firstMsg != "" {
 				h := sha256.Sum256([]byte(firstMsg))
 				seed += ":" + hex.EncodeToString(h[:8])

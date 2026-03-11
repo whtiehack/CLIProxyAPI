@@ -37,7 +37,7 @@ func TestCodexExecutorCacheHelper_OpenAIChatCompletions_StablePromptCacheKeyFrom
 		t.Fatalf("read request body: %v", errRead)
 	}
 
-	expectedKey := uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:prompt-cache:test-api-key")).String()
+	expectedKey := uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:prompt-cache:test-api-key:gpt-5.3-codex")).String()
 	gotKey := gjson.GetBytes(body, "prompt_cache_key").String()
 	if gotKey != expectedKey {
 		t.Fatalf("prompt_cache_key = %q, want %q", gotKey, expectedKey)
@@ -60,5 +60,41 @@ func TestCodexExecutorCacheHelper_OpenAIChatCompletions_StablePromptCacheKeyFrom
 	gotKey2 := gjson.GetBytes(body2, "prompt_cache_key").String()
 	if gotKey2 != expectedKey {
 		t.Fatalf("prompt_cache_key (second call) = %q, want %q", gotKey2, expectedKey)
+	}
+}
+
+func TestCodexExecutorCacheHelper_OpenAIChatCompletions_SeparatesPromptCacheKeyByModel(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Set("apiKey", "test-api-key")
+
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	executor := &CodexExecutor{}
+	url := "https://example.com/responses"
+
+	makeRequest := func(model string) string {
+		rawJSON := []byte(`{"model":"` + model + `","stream":true}`)
+		req := cliproxyexecutor.Request{
+			Model:   model,
+			Payload: []byte(`{"model":"` + model + `"}`),
+		}
+		httpReq, err := executor.cacheHelper(ctx, sdktranslator.FromString("openai"), url, req, rawJSON)
+		if err != nil {
+			t.Fatalf("cacheHelper(%s) error: %v", model, err)
+		}
+		body, errRead := io.ReadAll(httpReq.Body)
+		if errRead != nil {
+			t.Fatalf("read request body (%s): %v", model, errRead)
+		}
+		return gjson.GetBytes(body, "prompt_cache_key").String()
+	}
+
+	gotA := makeRequest("gpt-5.3-codex")
+	gotB := makeRequest("gpt-5.2")
+	if gotA == "" || gotB == "" {
+		t.Fatalf("expected non-empty prompt cache keys, got %q and %q", gotA, gotB)
+	}
+	if gotA == gotB {
+		t.Fatalf("expected different prompt cache keys for different models, got %q", gotA)
 	}
 }

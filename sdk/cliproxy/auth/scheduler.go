@@ -177,7 +177,7 @@ func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, 
 	}
 	providerKey := strings.ToLower(strings.TrimSpace(provider))
 	modelKey := canonicalModelKey(model)
-	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
+	pinnedAuthID := releasePinnedAuthIfTried(pinnedAuthIDFromMetadata(opts.Metadata), tried)
 	preferWebsocket := cliproxyexecutor.DownstreamWebsocket(ctx) && providerKey == "codex" && pinnedAuthID == ""
 
 	s.mu.Lock()
@@ -219,7 +219,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 	if len(normalized) == 0 {
 		return nil, "", &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
-	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
+	pinnedAuthID := releasePinnedAuthIfTried(pinnedAuthIDFromMetadata(opts.Metadata), tried)
 	modelKey := canonicalModelKey(model)
 
 	s.mu.Lock()
@@ -312,6 +312,17 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		return picked, providerKey, nil
 	}
 	return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
+}
+
+func releasePinnedAuthIfTried(pinnedAuthID string, tried map[string]struct{}) string {
+	pinnedAuthID = strings.TrimSpace(pinnedAuthID)
+	if pinnedAuthID == "" || len(tried) == 0 {
+		return pinnedAuthID
+	}
+	if _, used := tried[pinnedAuthID]; used {
+		return ""
+	}
+	return pinnedAuthID
 }
 
 // mixedUnavailableErrorLocked synthesizes the mixed-provider cooldown or unavailable error.

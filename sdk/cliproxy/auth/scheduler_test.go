@@ -208,6 +208,69 @@ func TestSchedulerPick_CodexWebsocketPrefersWebsocketEnabledSubset(t *testing.T)
 	}
 }
 
+func TestSchedulerPick_SingleProviderFallsBackAfterPinnedAuthWasTried(t *testing.T) {
+	t.Parallel()
+
+	model := "gpt-5.3-codex"
+	registerSchedulerModels(t, "codex", model, "codex-a", "codex-b")
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: "codex-a", Provider: "codex"},
+		&Auth{ID: "codex-b", Provider: "codex"},
+	)
+
+	opts := cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.PinnedAuthMetadataKey: "codex-a",
+		},
+	}
+	tried := map[string]struct{}{"codex-a": {}}
+
+	got, errPick := scheduler.pickSingle(context.Background(), "codex", model, opts, tried)
+	if errPick != nil {
+		t.Fatalf("pickSingle() error = %v", errPick)
+	}
+	if got == nil {
+		t.Fatalf("pickSingle() auth = nil")
+	}
+	if got.ID != "codex-b" {
+		t.Fatalf("pickSingle() auth.ID = %q, want %q", got.ID, "codex-b")
+	}
+}
+
+func TestSchedulerPick_MixedProvidersFallsBackAfterPinnedAuthWasTried(t *testing.T) {
+	t.Parallel()
+
+	model := "gpt-5.3-codex"
+	registerSchedulerModels(t, "codex", model, "codex-a", "codex-b")
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: "codex-a", Provider: "codex"},
+		&Auth{ID: "codex-b", Provider: "codex"},
+	)
+
+	opts := cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.PinnedAuthMetadataKey: "codex-a",
+		},
+	}
+	tried := map[string]struct{}{"codex-a": {}}
+
+	got, providerKey, errPick := scheduler.pickMixed(context.Background(), []string{"codex"}, model, opts, tried)
+	if errPick != nil {
+		t.Fatalf("pickMixed() error = %v", errPick)
+	}
+	if providerKey != "codex" {
+		t.Fatalf("pickMixed() provider = %q, want %q", providerKey, "codex")
+	}
+	if got == nil {
+		t.Fatalf("pickMixed() auth = nil")
+	}
+	if got.ID != "codex-b" {
+		t.Fatalf("pickMixed() auth.ID = %q, want %q", got.ID, "codex-b")
+	}
+}
+
 func TestSchedulerPick_MixedProvidersUsesProviderRotationOverReadyCandidates(t *testing.T) {
 	t.Parallel()
 

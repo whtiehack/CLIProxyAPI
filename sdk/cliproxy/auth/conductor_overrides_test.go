@@ -108,6 +108,58 @@ func (e *credentialRetryLimitExecutor) Calls() int {
 	return e.calls
 }
 
+type pinnedFallbackExecutor struct {
+	id string
+
+	mu      sync.Mutex
+	authIDs []string
+}
+
+func (e *pinnedFallbackExecutor) Identifier() string {
+	return e.id
+}
+
+func (e *pinnedFallbackExecutor) Execute(_ context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	e.recordAuth(auth)
+	if auth != nil && auth.ID == "auth-1" {
+		return cliproxyexecutor.Response{}, &Error{HTTPStatus: 500, Message: "boom"}
+	}
+	return cliproxyexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
+}
+
+func (e *pinnedFallbackExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return nil, &Error{HTTPStatus: 500, Message: "not implemented"}
+}
+
+func (e *pinnedFallbackExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+
+func (e *pinnedFallbackExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, &Error{HTTPStatus: 500, Message: "not implemented"}
+}
+
+func (e *pinnedFallbackExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+func (e *pinnedFallbackExecutor) recordAuth(auth *Auth) {
+	if auth == nil {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.authIDs = append(e.authIDs, auth.ID)
+}
+
+func (e *pinnedFallbackExecutor) AuthIDs() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]string, len(e.authIDs))
+	copy(out, e.authIDs)
+	return out
+}
+
 func newCredentialRetryLimitTestManager(t *testing.T, maxRetryCredentials int) (*Manager, *credentialRetryLimitExecutor) {
 	t.Helper()
 
@@ -228,5 +280,48 @@ func TestManager_MarkResult_RespectsAuthDisableCoolingOverride(t *testing.T) {
 	}
 	if !state.NextRetryAfter.IsZero() {
 		t.Fatalf("expected NextRetryAfter to be zero when disable_cooling=true, got %v", state.NextRetryAfter)
+	}
+}
+
+func TestManager_Execute_FallsBackAfterPinnedAuthFailsWithScheduler(t *testing.T) {
+	executor := &pinnedFallbackExecutor{id: "codex"}
+	manager := NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("auth-1", "codex", []*registry.ModelInfo{{ID: "test-model"}})
+	reg.RegisterClient("auth-2", "codex", []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		reg.UnregisterClient("auth-1")
+		reg.UnregisterClient("auth-2")
+	})
+
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-1", Provider: "codex"}); errRegister != nil {
+		t.Fatalf("register auth-1: %v", errRegister)
+	}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-2", Provider: "codex"}); errRegister != nil {
+		t.Fatalf("register auth-2: %v", errRegister)
+	}
+
+	var selected []string
+	resp, errExecute := manager.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: "test-model"}, cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.PinnedAuthMetadataKey:           "auth-1",
+			cliproxyexecutor.SelectedAuthCallbackMetadataKey: func(authID string) { selected = append(selected, authID) },
+		},
+	})
+	if errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+	if string(resp.Payload) != `{"ok":true}` {
+		t.Fatalf("payload = %q, want %q", string(resp.Payload), `{"ok":true}`)
+	}
+
+	gotAuths := executor.AuthIDs()
+	if len(gotAuths) != 2 || gotAuths[0] != "auth-1" || gotAuths[1] != "auth-2" {
+		t.Fatalf("executor auth sequence = %v, want [auth-1 auth-2]", gotAuths)
+	}
+	if len(selected) != 2 || selected[0] != "auth-1" || selected[1] != "auth-2" {
+		t.Fatalf("selected auth callback sequence = %v, want [auth-1 auth-2]", selected)
 	}
 }

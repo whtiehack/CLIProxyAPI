@@ -29,9 +29,20 @@ import (
 // ---------- prompt_cache_key session affinity ----------
 
 const (
-	promptCachePinTTL  = 30 * time.Minute
-	pinStoreGCInterval = 5 * time.Minute
+	promptCachePinTTL       = 30 * time.Minute
+	promptCachePinTTLSlow   = 5 * time.Minute
+	promptCacheSlowThreshold = 3 * time.Minute
+	pinStoreGCInterval      = 5 * time.Minute
 )
+
+type pinContextKey struct{}
+
+var pinCtxKey = pinContextKey{}
+
+type pinContextValue struct {
+	storeKey string
+	authID   string
+}
 
 type promptCachePin struct {
 	authID    string
@@ -59,10 +70,14 @@ func (s *promptCachePinStore) get(key string) (string, bool) {
 }
 
 func (s *promptCachePinStore) set(key, authID string) {
+	s.setWithTTL(key, authID, promptCachePinTTL)
+}
+
+func (s *promptCachePinStore) setWithTTL(key, authID string, ttl time.Duration) {
 	s.mu.Lock()
 	s.pins[key] = promptCachePin{
 		authID:    authID,
-		expiresAt: time.Now().Add(promptCachePinTTL),
+		expiresAt: time.Now().Add(ttl),
 	}
 	if now := time.Now(); now.Sub(s.lastGC) >= pinStoreGCInterval {
 		for k, pin := range s.pins {
@@ -73,6 +88,25 @@ func (s *promptCachePinStore) set(key, authID string) {
 		s.lastGC = now
 	}
 	s.mu.Unlock()
+}
+
+func (s *promptCachePinStore) delete(key string) {
+	s.mu.Lock()
+	delete(s.pins, key)
+	s.mu.Unlock()
+}
+
+func (s *promptCachePinStore) updateAfterRequest(key, authID string, duration time.Duration) {
+	if key == "" || authID == "" {
+		return
+	}
+	if duration > promptCacheSlowThreshold {
+		s.delete(key)
+	} else if duration > 10*time.Second {
+		s.setWithTTL(key, authID, promptCachePinTTLSlow)
+	} else {
+		s.set(key, authID)
+	}
 }
 
 func modelAffinityKey(rawJSON []byte) string {
@@ -151,6 +185,7 @@ func applyPromptCacheAuthPinning(cliCtx context.Context, rawJSON []byte) context
 		if authID, ok := pinStore.get(promptCacheKey); ok {
 			cliCtx = handlers.WithPinnedAuthID(cliCtx, authID)
 			cliCtx = handlers.WithSelectedAuthIDCallback(cliCtx, updateCallback(promptCacheKey, authID))
+			cliCtx = context.WithValue(cliCtx, pinCtxKey, &pinContextValue{storeKey: promptCacheKey, authID: authID})
 			return cliCtx
 		}
 	}
@@ -165,6 +200,7 @@ func applyPromptCacheAuthPinning(cliCtx context.Context, rawJSON []byte) context
 			}
 			cliCtx = handlers.WithPinnedAuthID(cliCtx, authID)
 			cliCtx = handlers.WithSelectedAuthIDCallback(cliCtx, updateCallback(storeKey, authID))
+			cliCtx = context.WithValue(cliCtx, pinCtxKey, &pinContextValue{storeKey: storeKey, authID: authID})
 			return cliCtx
 		}
 	}
@@ -177,11 +213,32 @@ func applyPromptCacheAuthPinning(cliCtx context.Context, rawJSON []byte) context
 	if storeKey == "" {
 		return cliCtx
 	}
-	return handlers.WithSelectedAuthIDCallback(cliCtx, func(authID string) {
+	cliCtx = handlers.WithSelectedAuthIDCallback(cliCtx, func(authID string) {
 		if authID = strings.TrimSpace(authID); authID != "" {
 			pinStore.set(storeKey, authID)
 		}
 	})
+	cliCtx = context.WithValue(cliCtx, pinCtxKey, &pinContextValue{storeKey: storeKey})
+	return cliCtx
+}
+
+// updatePinAfterRequest updates the pin based on request duration
+func updatePinAfterRequest(ctx context.Context, duration time.Duration) {
+	val := ctx.Value(pinCtxKey)
+	if val == nil {
+		return
+	}
+	pinVal, ok := val.(*pinContextValue)
+	if !ok || pinVal == nil || pinVal.storeKey == "" {
+		return
+	}
+	// Get the actual authID used (may have changed via callback)
+	authID := pinVal.authID
+	if authID == "" {
+		// First request, authID will be set via callback, skip update
+		return
+	}
+	pinStore.updateAfterRequest(pinVal.storeKey, authID, duration)
 }
 
 // OpenAIResponsesAPIHandler contains the handlers for OpenAIResponses API endpoints.
@@ -288,8 +345,11 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	cliCtx = applyPromptCacheAuthPinning(cliCtx, rawJSON)
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
+	startTime := time.Now()
 	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "responses/compact")
+	duration := time.Since(startTime)
 	stopKeepAlive()
+	updatePinAfterRequest(cliCtx, duration)
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
 		cliCancel(errMsg.Error)
@@ -315,8 +375,11 @@ func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, r
 	cliCtx = applyPromptCacheAuthPinning(cliCtx, rawJSON)
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 
+	startTime := time.Now()
 	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
+	duration := time.Since(startTime)
 	stopKeepAlive()
+	updatePinAfterRequest(cliCtx, duration)
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
 		cliCancel(errMsg.Error)
@@ -351,6 +414,10 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	cliCtx = applyPromptCacheAuthPinning(cliCtx, rawJSON)
+	startTime := time.Now()
+	defer func() {
+		updatePinAfterRequest(cliCtx, time.Since(startTime))
+	}()
 	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
 
 	setSSEHeaders := func() {

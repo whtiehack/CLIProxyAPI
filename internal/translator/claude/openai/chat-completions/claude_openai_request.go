@@ -162,32 +162,25 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	// Stream configuration to enable or disable streaming responses
 	out, _ = sjson.Set(out, "stream", stream)
 
+	// Collect system messages into the top-level "system" field (Anthropic format)
+	// instead of injecting them as role:"user" messages.
+	var systemParts []string
+
 	// Process messages and transform them to Claude Code format
 	if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {
 		messageIndex := 0
-		systemMessageIndex := -1
 		messages.ForEach(func(_, message gjson.Result) bool {
 			role := message.Get("role").String()
 			contentResult := message.Get("content")
 
 			switch role {
 			case "system":
-				if systemMessageIndex == -1 {
-					systemMsg := `{"role":"user","content":[]}`
-					out, _ = sjson.SetRaw(out, "messages.-1", systemMsg)
-					systemMessageIndex = messageIndex
-					messageIndex++
-				}
 				if contentResult.Exists() && contentResult.Type == gjson.String && contentResult.String() != "" {
-					textPart := `{"type":"text","text":""}`
-					textPart, _ = sjson.Set(textPart, "text", contentResult.String())
-					out, _ = sjson.SetRaw(out, fmt.Sprintf("messages.%d.content.-1", systemMessageIndex), textPart)
+					systemParts = append(systemParts, contentResult.String())
 				} else if contentResult.Exists() && contentResult.IsArray() {
 					contentResult.ForEach(func(_, part gjson.Result) bool {
-						if part.Get("type").String() == "text" {
-							textPart := `{"type":"text","text":""}`
-							textPart, _ = sjson.Set(textPart, "text", part.Get("text").String())
-							out, _ = sjson.SetRaw(out, fmt.Sprintf("messages.%d.content.-1", systemMessageIndex), textPart)
+						if part.Get("type").String() == "text" && part.Get("text").String() != "" {
+							systemParts = append(systemParts, part.Get("text").String())
 						}
 						return true
 					})
@@ -269,6 +262,21 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 			}
 			return true
 		})
+	}
+
+	// Set collected system messages into the top-level "system" field
+	if len(systemParts) > 0 {
+		systemArray := "["
+		for i, part := range systemParts {
+			block := `{"type":"text","text":""}`
+			block, _ = sjson.Set(block, "text", part)
+			if i > 0 {
+				systemArray += ","
+			}
+			systemArray += block
+		}
+		systemArray += "]"
+		out, _ = sjson.SetRaw(out, "system", systemArray)
 	}
 
 	// Tools mapping: OpenAI tools -> Claude Code tools

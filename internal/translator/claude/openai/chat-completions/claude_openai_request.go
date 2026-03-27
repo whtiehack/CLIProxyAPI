@@ -162,10 +162,6 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	// Stream configuration to enable or disable streaming responses
 	out, _ = sjson.SetBytes(out, "stream", stream)
 
-	// Collect system messages into the top-level "system" field (Anthropic format)
-	// instead of injecting them as role:"user" messages.
-	var systemParts []string
-
 	// Process messages and transform them to Claude Code format
 	if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {
 		messageIndex := 0
@@ -176,11 +172,15 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 			switch role {
 			case "system":
 				if contentResult.Exists() && contentResult.Type == gjson.String && contentResult.String() != "" {
-					systemParts = append(systemParts, contentResult.String())
+					textPart := []byte(`{"type":"text","text":""}`)
+					textPart, _ = sjson.SetBytes(textPart, "text", contentResult.String())
+					out, _ = sjson.SetRawBytes(out, "system.-1", textPart)
 				} else if contentResult.Exists() && contentResult.IsArray() {
 					contentResult.ForEach(func(_, part gjson.Result) bool {
 						if part.Get("type").String() == "text" && part.Get("text").String() != "" {
-							systemParts = append(systemParts, part.Get("text").String())
+							textPart := []byte(`{"type":"text","text":""}`)
+							textPart, _ = sjson.SetBytes(textPart, "text", part.Get("text").String())
+							out, _ = sjson.SetRawBytes(out, "system.-1", textPart)
 						}
 						return true
 					})
@@ -262,21 +262,16 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 			}
 			return true
 		})
-	}
 
-	// Set collected system messages into the top-level "system" field
-	if len(systemParts) > 0 {
-		systemArray := []byte("[")
-		for i, part := range systemParts {
-			block := []byte(`{"type":"text","text":""}`)
-			block, _ = sjson.SetBytes(block, "text", part)
-			if i > 0 {
-				systemArray = append(systemArray, ',')
+		// Preserve a minimal conversational turn for system-only inputs.
+		// Claude payloads with top-level system instructions but no messages are risky for downstream validation.
+		if messageIndex == 0 {
+			system := gjson.GetBytes(out, "system")
+			if system.Exists() && system.IsArray() && len(system.Array()) > 0 {
+				fallbackMsg := []byte(`{"role":"user","content":[{"type":"text","text":""}]}`)
+				out, _ = sjson.SetRawBytes(out, "messages.-1", fallbackMsg)
 			}
-			systemArray = append(systemArray, block...)
 		}
-		systemArray = append(systemArray, ']')
-		out, _ = sjson.SetRawBytes(out, "system", systemArray)
 	}
 
 	// Tools mapping: OpenAI tools -> Claude Code tools

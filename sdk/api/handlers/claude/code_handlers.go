@@ -10,15 +10,22 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	. "github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -26,6 +33,189 @@ import (
 
 // ClaudeCodeAPIHandler contains the handlers for Claude API endpoints.
 // It holds a pool of clients to interact with the backend service.
+const (
+	claudeAuthPinTTL        = 30 * time.Minute
+	claudeAuthPinTTLSlow    = 5 * time.Minute
+	claudeAuthPinSlowThresh = 3 * time.Minute
+	claudeAuthPinGCInterval = 5 * time.Minute
+)
+
+type claudePinContextKey struct{}
+
+var claudePinCtxKey = claudePinContextKey{}
+
+type claudePinContextValue struct {
+	storeKey string
+	authID   string
+}
+
+type claudeAuthPin struct {
+	authID    string
+	expiresAt time.Time
+}
+
+type claudeAuthPinStore struct {
+	mu     sync.RWMutex
+	pins   map[string]claudeAuthPin
+	lastGC time.Time
+}
+
+var claudePinStore = &claudeAuthPinStore{
+	pins: make(map[string]claudeAuthPin),
+}
+
+func (s *claudeAuthPinStore) get(key string) (string, bool) {
+	s.mu.RLock()
+	pin, ok := s.pins[key]
+	s.mu.RUnlock()
+	if !ok || time.Now().After(pin.expiresAt) {
+		return "", false
+	}
+	return pin.authID, true
+}
+
+func (s *claudeAuthPinStore) set(key, authID string) {
+	s.setWithTTL(key, authID, claudeAuthPinTTL)
+}
+
+func (s *claudeAuthPinStore) setWithTTL(key, authID string, ttl time.Duration) {
+	s.mu.Lock()
+	s.pins[key] = claudeAuthPin{
+		authID:    authID,
+		expiresAt: time.Now().Add(ttl),
+	}
+	if now := time.Now(); now.Sub(s.lastGC) >= claudeAuthPinGCInterval {
+		for k, pin := range s.pins {
+			if now.After(pin.expiresAt) {
+				delete(s.pins, k)
+			}
+		}
+		s.lastGC = now
+	}
+	s.mu.Unlock()
+}
+
+func (s *claudeAuthPinStore) delete(key string) {
+	s.mu.Lock()
+	delete(s.pins, key)
+	s.mu.Unlock()
+}
+
+func (s *claudeAuthPinStore) updateAfterRequest(key, authID string, duration time.Duration) {
+	if key == "" || authID == "" {
+		return
+	}
+	if duration > claudeAuthPinSlowThresh {
+		s.delete(key)
+	} else if duration > 10*time.Second {
+		s.setWithTTL(key, authID, claudeAuthPinTTLSlow)
+	} else {
+		s.set(key, authID)
+	}
+}
+
+func claudeAuthPinKey(rawJSON []byte, normalizedModel string) string {
+	userID := strings.TrimSpace(gjson.GetBytes(rawJSON, "metadata.user_id").String())
+	if userID == "" {
+		return ""
+	}
+	modelKey := strings.TrimSpace(normalizedModel)
+	if modelKey == "" {
+		modelKey = strings.TrimSpace(gjson.GetBytes(rawJSON, "model").String())
+	}
+	if modelKey == "" {
+		return ""
+	}
+	firstMessage := strings.TrimSpace(gjson.GetBytes(rawJSON, "messages.0.content").String())
+	if firstMessage == "" {
+		return ""
+	}
+	h := sha256.Sum256([]byte(firstMessage))
+	return "claude:" + modelKey + ":" + userID + ":" + hex.EncodeToString(h[:8])
+}
+
+func applyClaudeAuthPinning(cliCtx context.Context, rawJSON []byte, normalizedModel string) context.Context {
+	storeKey := claudeAuthPinKey(rawJSON, normalizedModel)
+	if storeKey == "" {
+		return cliCtx
+	}
+	if authID, ok := claudePinStore.get(storeKey); ok {
+		pinVal := &claudePinContextValue{storeKey: storeKey, authID: authID}
+		cliCtx = handlers.WithPinnedAuthID(cliCtx, authID)
+		cliCtx = handlers.WithSelectedAuthIDCallback(cliCtx, func(newAuthID string) {
+			if newAuthID = strings.TrimSpace(newAuthID); newAuthID != "" {
+				pinVal.authID = newAuthID
+				if newAuthID != authID {
+					claudePinStore.set(storeKey, newAuthID)
+				}
+			}
+		})
+		cliCtx = context.WithValue(cliCtx, claudePinCtxKey, pinVal)
+		return cliCtx
+	}
+	pinVal := &claudePinContextValue{storeKey: storeKey}
+	cliCtx = handlers.WithSelectedAuthIDCallback(cliCtx, func(authID string) {
+		if authID = strings.TrimSpace(authID); authID != "" {
+			pinVal.authID = authID
+			claudePinStore.set(storeKey, authID)
+		}
+	})
+	cliCtx = context.WithValue(cliCtx, claudePinCtxKey, pinVal)
+	return cliCtx
+}
+
+func updateClaudePinAfterRequest(ctx context.Context, duration time.Duration) {
+	val := ctx.Value(claudePinCtxKey)
+	if val == nil {
+		return
+	}
+	pinVal, ok := val.(*claudePinContextValue)
+	if !ok || pinVal == nil || pinVal.storeKey == "" {
+		return
+	}
+	authID := pinVal.authID
+	if authID == "" {
+		return
+	}
+	claudePinStore.updateAfterRequest(pinVal.storeKey, authID, duration)
+}
+
+func hasCodexProvider(providers []string) bool {
+	for _, provider := range providers {
+		if strings.EqualFold(strings.TrimSpace(provider), "codex") {
+			return true
+		}
+	}
+	return false
+}
+
+func resolveRequestDetails(modelName string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
+	resolvedModelName := modelName
+	initialSuffix := thinking.ParseSuffix(modelName)
+	if initialSuffix.ModelName == "auto" {
+		resolvedBase := util.ResolveAutoModel(initialSuffix.ModelName)
+		if initialSuffix.HasSuffix {
+			resolvedModelName = fmt.Sprintf("%s(%s)", resolvedBase, initialSuffix.RawSuffix)
+		} else {
+			resolvedModelName = resolvedBase
+		}
+	} else {
+		resolvedModelName = util.ResolveAutoModel(modelName)
+	}
+
+	parsed := thinking.ParseSuffix(resolvedModelName)
+	baseModel := strings.TrimSpace(parsed.ModelName)
+
+	providers = util.GetProviderName(baseModel)
+	if len(providers) == 0 && baseModel != resolvedModelName {
+		providers = util.GetProviderName(resolvedModelName)
+	}
+	if len(providers) == 0 {
+		return nil, "", &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("unknown provider for model %s", modelName)}
+	}
+	return providers, resolvedModelName, nil
+}
+
 type ClaudeCodeAPIHandler struct {
 	*handlers.BaseAPIHandler
 }
@@ -162,12 +352,24 @@ func (h *ClaudeCodeAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSO
 	c.Header("Content-Type", "application/json")
 	alt := h.GetAlt(c)
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 
 	modelName := gjson.GetBytes(rawJSON, "model").String()
+	providers, normalizedModel, errMsg := resolveRequestDetails(modelName)
+	if errMsg != nil {
+		h.WriteErrorResponse(c, errMsg)
+		cliCancel(errMsg.Error)
+		return
+	}
+	if hasCodexProvider(providers) {
+		cliCtx = applyClaudeAuthPinning(cliCtx, rawJSON, normalizedModel)
+	}
+	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
+	startTime := time.Now()
 
 	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, alt)
+	duration := time.Since(startTime)
 	stopKeepAlive()
+	updateClaudePinAfterRequest(cliCtx, duration)
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
 		cliCancel(errMsg.Error)
@@ -222,10 +424,22 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
 	}
 
 	modelName := gjson.GetBytes(rawJSON, "model").String()
+	providers, normalizedModel, errMsg := resolveRequestDetails(modelName)
+	if errMsg != nil {
+		h.WriteErrorResponse(c, errMsg)
+		return
+	}
 
 	// Create a cancellable context for the backend client request
 	// This allows proper cleanup and cancellation of ongoing requests
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	if hasCodexProvider(providers) {
+		cliCtx = applyClaudeAuthPinning(cliCtx, rawJSON, normalizedModel)
+	}
+	startTime := time.Now()
+	defer func() {
+		updateClaudePinAfterRequest(cliCtx, time.Since(startTime))
+	}()
 
 	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
 	setSSEHeaders := func() {

@@ -540,11 +540,30 @@ func streamErrorResult(headers http.Header, err error) *cliproxyexecutor.StreamR
 	}
 }
 
-func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamChunk) ([]cliproxyexecutor.StreamChunk, bool, error) {
+// errStreamStall is a sentinel error returned when the upstream stream produces no payload
+// within the configured stall-timeout-seconds window.
+var errStreamStall = &Error{
+	Code:       "stream_stall",
+	Message:    "upstream stream stalled: no payload received within timeout",
+	Retryable:  true,
+	HTTPStatus: 502,
+}
+
+func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamChunk, stallTimeout time.Duration) ([]cliproxyexecutor.StreamChunk, bool, error) {
 	if ch == nil {
 		return nil, true, nil
 	}
 	buffered := make([]cliproxyexecutor.StreamChunk, 0, 1)
+
+	// Set up optional stall timer for first-payload detection.
+	var stallCh <-chan time.Time
+	var stallTimer *time.Timer
+	if stallTimeout > 0 {
+		stallTimer = time.NewTimer(stallTimeout)
+		stallCh = stallTimer.C
+		defer stallTimer.Stop()
+	}
+
 	for {
 		var (
 			chunk cliproxyexecutor.StreamChunk
@@ -554,10 +573,16 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 			select {
 			case <-ctx.Done():
 				return nil, false, ctx.Err()
+			case <-stallCh:
+				return nil, false, errStreamStall
 			case chunk, ok = <-ch:
 			}
 		} else {
-			chunk, ok = <-ch
+			select {
+			case <-stallCh:
+				return nil, false, errStreamStall
+			case chunk, ok = <-ch:
+			}
 		}
 		if !ok {
 			return buffered, true, nil
@@ -625,6 +650,13 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 	if executor == nil {
 		return nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
+
+	// Resolve stall timeout from runtime config.
+	var stallTimeout time.Duration
+	if cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config); cfg != nil && cfg.Streaming.StallTimeoutSeconds > 0 {
+		stallTimeout = time.Duration(cfg.Streaming.StallTimeoutSeconds) * time.Second
+	}
+
 	var lastErr error
 	for idx, execModel := range execModels {
 		resultModel := executionResultModel(routeModel, execModel, pooled)
@@ -649,11 +681,20 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			continue
 		}
 
-		buffered, closed, bootstrapErr := readStreamBootstrap(ctx, streamResult.Chunks)
+		buffered, closed, bootstrapErr := readStreamBootstrap(ctx, streamResult.Chunks, stallTimeout)
 		if bootstrapErr != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
 				discardStreamChunks(streamResult.Chunks)
 				return nil, errCtx
+			}
+			// Stream stall: mark the credential unavailable and retry with next model/key.
+			if bootstrapErr == errStreamStall {
+				log.Warnf("[stream_stall] auth=%s model=%s: no SSE payload within stall timeout, suspending for 30m", auth.ID, resultModel)
+				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: errStreamStall}
+				m.MarkResult(ctx, result)
+				discardStreamChunks(streamResult.Chunks)
+				lastErr = bootstrapErr
+				continue
 			}
 			if isRequestInvalidError(bootstrapErr) {
 				rerr := &Error{Message: bootstrapErr.Error()}
@@ -1748,6 +1789,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					next := now.Add(12 * time.Hour)
 					state.NextRetryAfter = next
 					suspendReason = "model_not_supported"
+					shouldSuspendModel = true
+				} else if result.Error != nil && result.Error.Code == "stream_stall" {
+					next := now.Add(30 * time.Minute)
+					state.NextRetryAfter = next
+					suspendReason = "stream_stall"
 					shouldSuspendModel = true
 				} else {
 					switch statusCode {

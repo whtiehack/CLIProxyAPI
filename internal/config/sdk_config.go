@@ -42,4 +42,10 @@ type StreamingConfig struct {
 	// to allow auth rotation / transient recovery.
 	// <= 0 disables bootstrap retries. Default is 0.
 	BootstrapRetries int `yaml:"bootstrap-retries,omitempty" json:"bootstrap-retries,omitempty"`
+
+	// StallTimeoutSeconds sets the maximum time (in seconds) to wait for the first SSE payload
+	// during stream bootstrap. If no payload arrives within this duration, the credential is
+	// temporarily marked unavailable for 30 minutes.
+	// <= 0 disables stall detection. Default is 0 (disabled).
+	StallTimeoutSeconds int `yaml:"stall-timeout-seconds,omitempty" json:"stall-timeout-seconds,omitempty"`
 }

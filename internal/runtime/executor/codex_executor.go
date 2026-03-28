@@ -371,10 +371,26 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				log.Errorf("codex executor: close response body error: %v", errClose)
 			}
 		}()
+
+		// Set up optional stream idle timeout: if no upstream data arrives within the
+		// configured duration, close the response body to unblock the scanner.
+		var idleTimer *time.Timer
+		if e.cfg != nil && e.cfg.Streaming.StreamIdleTimeoutSeconds > 0 {
+			idleDur := time.Duration(e.cfg.Streaming.StreamIdleTimeoutSeconds) * time.Second
+			idleTimer = time.AfterFunc(idleDur, func() {
+				log.Warnf("[stream_idle_timeout] closing upstream connection after %v idle", idleDur)
+				httpResp.Body.Close()
+			})
+			defer idleTimer.Stop()
+		}
+
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
 		for scanner.Scan() {
+			if idleTimer != nil {
+				idleTimer.Reset(time.Duration(e.cfg.Streaming.StreamIdleTimeoutSeconds) * time.Second)
+			}
 			line := scanner.Bytes()
 			appendAPIResponseChunk(ctx, e.cfg, line)
 

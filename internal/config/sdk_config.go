@@ -48,4 +48,10 @@ type StreamingConfig struct {
 	// temporarily marked unavailable for 30 minutes.
 	// <= 0 disables stall detection. Default is 0 (disabled).
 	StallTimeoutSeconds int `yaml:"stall-timeout-seconds,omitempty" json:"stall-timeout-seconds,omitempty"`
+
+	// StreamIdleTimeoutSeconds sets the maximum idle time (in seconds) during active streaming.
+	// If no upstream data is received within this duration after the last chunk, the connection
+	// is closed. This prevents requests from hanging indefinitely when upstream stops responding
+	// mid-stream. <= 0 disables idle timeout. Default is 0 (disabled).
+	StreamIdleTimeoutSeconds int `yaml:"stream-idle-timeout-seconds,omitempty" json:"stream-idle-timeout-seconds,omitempty"`
 }

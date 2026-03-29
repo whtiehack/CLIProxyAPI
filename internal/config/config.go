@@ -65,6 +65,11 @@ type Config struct {
 	// UsageStatisticsEnabled toggles in-memory usage aggregation; when false, usage data is discarded.
 	UsageStatisticsEnabled bool `yaml:"usage-statistics-enabled" json:"usage-statistics-enabled"`
 
+	// UsageStatisticsPersistIntervalSeconds controls how often usage statistics
+	// are automatically flushed to disk. Set to 0 to disable periodic flushes
+	// while still allowing startup restore and shutdown save.
+	UsageStatisticsPersistIntervalSeconds int `yaml:"usage-statistics-persist-interval-seconds" json:"usage-statistics-persist-interval-seconds"`
+
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
 
@@ -73,6 +78,10 @@ type Config struct {
 	// MaxRetryCredentials defines the maximum number of credentials to try for a failed request.
 	// Set to 0 or a negative value to keep trying all available credentials (legacy behavior).
 	MaxRetryCredentials int `yaml:"max-retry-credentials" json:"max-retry-credentials"`
+	// MaxInvalidRequestRetries defines how many additional credentials may be tried
+	// after a caller-side request-shape error is detected. Set to 0 to stop
+	// immediately on the first such error.
+	MaxInvalidRequestRetries int `yaml:"max-invalid-request-retries" json:"max-invalid-request-retries"`
 	// MaxRetryInterval defines the maximum wait time in seconds before retrying a cooled-down credential.
 	MaxRetryInterval int `yaml:"max-retry-interval" json:"max-retry-interval"`
 
@@ -571,6 +580,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.LogsMaxTotalSizeMB = 0
 	cfg.ErrorLogsMaxFiles = 10
 	cfg.UsageStatisticsEnabled = false
+	cfg.UsageStatisticsPersistIntervalSeconds = 30
 	cfg.DisableCooling = false
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr
@@ -631,9 +641,15 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	if cfg.ErrorLogsMaxFiles < 0 {
 		cfg.ErrorLogsMaxFiles = 10
 	}
+	if cfg.UsageStatisticsPersistIntervalSeconds < 0 {
+		cfg.UsageStatisticsPersistIntervalSeconds = 0
+	}
 
 	if cfg.MaxRetryCredentials < 0 {
 		cfg.MaxRetryCredentials = 0
+	}
+	if cfg.MaxInvalidRequestRetries < 0 {
+		cfg.MaxInvalidRequestRetries = 0
 	}
 
 	// Sanitize Gemini API key configuration and migrate legacy entries.

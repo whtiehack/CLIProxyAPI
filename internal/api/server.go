@@ -257,7 +257,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	s.oldConfigYaml, _ = yaml.Marshal(cfg)
 	s.applyAccessConfig(nil, cfg)
 	if authManager != nil {
-		authManager.SetRetryConfig(cfg.RequestRetry, time.Duration(cfg.MaxRetryInterval)*time.Second, cfg.MaxRetryCredentials)
+		authManager.SetRetryConfig(cfg.RequestRetry, time.Duration(cfg.MaxRetryInterval)*time.Second, cfg.MaxRetryCredentials, cfg.MaxInvalidRequestRetries)
 	}
 	managementasset.SetCurrentConfig(cfg)
 	auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
@@ -514,6 +514,10 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/usage-statistics-enabled", s.mgmt.PutUsageStatisticsEnabled)
 		mgmt.PATCH("/usage-statistics-enabled", s.mgmt.PutUsageStatisticsEnabled)
 
+		mgmt.GET("/usage-statistics-persist-interval-seconds", s.mgmt.GetUsageStatisticsPersistInterval)
+		mgmt.PUT("/usage-statistics-persist-interval-seconds", s.mgmt.PutUsageStatisticsPersistInterval)
+		mgmt.PATCH("/usage-statistics-persist-interval-seconds", s.mgmt.PutUsageStatisticsPersistInterval)
+
 		mgmt.GET("/proxy-url", s.mgmt.GetProxyURL)
 		mgmt.PUT("/proxy-url", s.mgmt.PutProxyURL)
 		mgmt.PATCH("/proxy-url", s.mgmt.PutProxyURL)
@@ -578,6 +582,9 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/request-retry", s.mgmt.GetRequestRetry)
 		mgmt.PUT("/request-retry", s.mgmt.PutRequestRetry)
 		mgmt.PATCH("/request-retry", s.mgmt.PutRequestRetry)
+		mgmt.GET("/max-invalid-request-retries", s.mgmt.GetMaxInvalidRequestRetries)
+		mgmt.PUT("/max-invalid-request-retries", s.mgmt.PutMaxInvalidRequestRetries)
+		mgmt.PATCH("/max-invalid-request-retries", s.mgmt.PutMaxInvalidRequestRetries)
 		mgmt.GET("/max-retry-interval", s.mgmt.GetMaxRetryInterval)
 		mgmt.PUT("/max-retry-interval", s.mgmt.PutMaxRetryInterval)
 		mgmt.PATCH("/max-retry-interval", s.mgmt.PutMaxRetryInterval)
@@ -915,7 +922,7 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	}
 
 	if s.handlers != nil && s.handlers.AuthManager != nil {
-		s.handlers.AuthManager.SetRetryConfig(cfg.RequestRetry, time.Duration(cfg.MaxRetryInterval)*time.Second, cfg.MaxRetryCredentials)
+		s.handlers.AuthManager.SetRetryConfig(cfg.RequestRetry, time.Duration(cfg.MaxRetryInterval)*time.Second, cfg.MaxRetryCredentials, cfg.MaxInvalidRequestRetries)
 	}
 
 	// Update log level dynamically when debug flag changes

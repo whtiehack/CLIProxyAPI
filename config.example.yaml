@@ -66,6 +66,9 @@ error-logs-max-files: 10
 # When false, disable in-memory usage statistics aggregation
 usage-statistics-enabled: false
 
+# Interval in seconds for persisting usage statistics to disk (0 = disable persistence)
+usage-statistics-persist-interval-seconds: 30
+
 # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
 # Per-entry proxy-url also supports "direct" or "none" to bypass both the global proxy-url and environment proxies explicitly.
 proxy-url: ""
@@ -86,6 +89,11 @@ max-retry-credentials: 0
 
 # Maximum wait time in seconds for a cooled-down credential before triggering a retry.
 max-retry-interval: 30
+
+# Maximum number of extra credential attempts after a caller-side request error
+# (for example invalid_request_error, invalid_json_schema, unsupported parameter,
+# or invalid image data). Set to 0 to stop immediately on the first such error.
+max-invalid-request-retries: 0
 
 # Quota exceeded behavior
 quota-exceeded:

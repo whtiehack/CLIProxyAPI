@@ -2215,6 +2215,14 @@ func isRequestInvalidBody(raw string) bool {
 	if err := json.Unmarshal([]byte(text), &payload); err != nil {
 		return false
 	}
+
+	// When the error targets the "model" parameter, it is a model-support
+	// failure that should remain eligible for auth/upstream fallback rather
+	// than being treated as a caller-side request-shape error.
+	if isModelParamError(&payload) {
+		return false
+	}
+
 	if strings.EqualFold(strings.TrimSpace(payload.Type), "invalid_request_error") {
 		return true
 	}
@@ -2228,6 +2236,28 @@ func isRequestInvalidBody(raw string) bool {
 		return true
 	}
 	return strings.TrimSpace(payload.Error.Param) != "" && (hasRequestInvalidCode(payload.Error.Code) || hasRequestInvalidSignal(payload.Error.Message))
+}
+
+// isModelParamError returns true when the parsed error body points to a model
+// parameter or model-related message, indicating a model-support issue rather
+// than a generic request-shape failure.
+func isModelParamError(p *requestInvalidBody) bool {
+	if p == nil {
+		return false
+	}
+	param := strings.TrimSpace(strings.ToLower(p.Error.Param))
+	if param == "model" {
+		return true
+	}
+	// Catch messages like "Invalid value for 'model': ..." even when param
+	// is not explicitly set.
+	combined := strings.ToLower(p.Error.Message + " " + p.Message + " " + p.Detail)
+	if strings.Contains(combined, "invalid value for 'model'") ||
+		strings.Contains(combined, `invalid value for "model"`) ||
+		strings.Contains(combined, "model_not_found") {
+		return true
+	}
+	return false
 }
 
 func hasRequestInvalidCode(code string) bool {
@@ -2251,8 +2281,6 @@ func hasRequestInvalidSignal(text string) bool {
 		"unsupported field",
 		"unknown parameter",
 		"unknown field",
-		"invalid value",
-		"invalid_value",
 		"does not represent a valid image",
 		"supported image formats",
 		"malformed payload",

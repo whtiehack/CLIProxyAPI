@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
@@ -60,10 +61,12 @@ func StatisticsEnabled() bool { return statisticsEnabled.Load() }
 type RequestStatistics struct {
 	mu sync.RWMutex
 
-	totalRequests int64
-	successCount  int64
-	failureCount  int64
-	totalTokens   int64
+	totalRequests  int64
+	successCount   int64
+	failureCount   int64
+	totalTokens    int64
+	changeCount    uint64
+	persistedCount uint64
 
 	apis map[string]*apiStats
 
@@ -92,6 +95,7 @@ type RequestDetail struct {
 	Timestamp time.Time  `json:"timestamp"`
 	LatencyMs int64      `json:"latency_ms"`
 	Source    string     `json:"source"`
+	ClientIP  string     `json:"client_ip"`
 	AuthIndex string     `json:"auth_index"`
 	Tokens    TokenStats `json:"tokens"`
 	Failed    bool       `json:"failed"`
@@ -201,6 +205,7 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		Timestamp: timestamp,
 		LatencyMs: normaliseLatency(record.Latency),
 		Source:    record.Source,
+		ClientIP:  resolveClientIP(ctx),
 		AuthIndex: record.AuthIndex,
 		Tokens:    detail,
 		Failed:    failed,
@@ -210,6 +215,7 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	s.requestsByHour[hourKey]++
 	s.tokensByDay[dayKey] += totalTokens
 	s.tokensByHour[hourKey] += totalTokens
+	s.markChangedLocked()
 }
 
 func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail RequestDetail) {
@@ -227,9 +233,16 @@ func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail
 
 // Snapshot returns a copy of the aggregated metrics for external consumption.
 func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
+	result, _, _ := s.SnapshotWithState()
+	return result
+}
+
+// SnapshotWithState returns a copy of the aggregated metrics together with the
+// current mutation and persisted counters.
+func (s *RequestStatistics) SnapshotWithState() (StatisticsSnapshot, uint64, uint64) {
 	result := StatisticsSnapshot{}
 	if s == nil {
-		return result
+		return result, 0, 0
 	}
 
 	s.mu.RLock()
@@ -281,7 +294,7 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 		result.TokensByHour[key] = v
 	}
 
-	return result
+	return result, s.changeCount, s.persistedCount
 }
 
 type MergeResult struct {
@@ -378,17 +391,60 @@ func (s *RequestStatistics) recordImported(apiName, modelName string, stats *api
 	s.requestsByHour[hourKey]++
 	s.tokensByDay[dayKey] += totalTokens
 	s.tokensByHour[hourKey] += totalTokens
+	s.markChangedLocked()
+}
+
+// HasPendingPersistence reports whether the in-memory snapshot contains changes
+// that have not been durably persisted yet.
+func (s *RequestStatistics) HasPendingPersistence() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.changeCount != s.persistedCount
+}
+
+// MarkPersisted advances the persisted counter to the provided snapshot
+// version. Newer in-memory changes remain pending.
+func (s *RequestStatistics) MarkPersisted(version uint64) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if version > s.changeCount {
+		version = s.changeCount
+	}
+	if version > s.persistedCount {
+		s.persistedCount = version
+	}
+}
+
+// MarkAllPersisted marks the current in-memory state as already persisted.
+func (s *RequestStatistics) MarkAllPersisted() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.persistedCount = s.changeCount
+}
+
+func (s *RequestStatistics) markChangedLocked() {
+	s.changeCount++
 }
 
 func dedupKey(apiName, modelName string, detail RequestDetail) string {
 	timestamp := detail.Timestamp.UTC().Format(time.RFC3339Nano)
 	tokens := normaliseTokenStats(detail.Tokens)
 	return fmt.Sprintf(
-		"%s|%s|%s|%s|%s|%t|%d|%d|%d|%d|%d",
+		"%s|%s|%s|%s|%s|%s|%t|%d|%d|%d|%d|%d",
 		apiName,
 		modelName,
 		timestamp,
 		detail.Source,
+		strings.TrimSpace(detail.ClientIP),
 		detail.AuthIndex,
 		detail.Failed,
 		tokens.InputTokens,
@@ -422,6 +478,19 @@ func resolveAPIIdentifier(ctx context.Context, record coreusage.Record) string {
 		return record.Provider
 	}
 	return "unknown"
+}
+
+// resolveClientIP uses the same IP resolution logic as the main HTTP logger,
+// ensuring the client_ip in usage statistics matches the one shown in logs.
+func resolveClientIP(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil || ginCtx.Request == nil {
+		return ""
+	}
+	return logging.ResolveClientIP(ginCtx)
 }
 
 func resolveSuccess(ctx context.Context) bool {

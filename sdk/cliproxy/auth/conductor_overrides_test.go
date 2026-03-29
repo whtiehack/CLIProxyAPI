@@ -14,7 +14,7 @@ import (
 
 func TestManager_ShouldRetryAfterError_RespectsAuthRequestRetryOverride(t *testing.T) {
 	m := NewManager(nil, nil, nil)
-	m.SetRetryConfig(3, 30*time.Second, 0)
+	m.SetRetryConfig(3, 30*time.Second, 0, 0)
 
 	model := "test-model"
 	next := time.Now().Add(5 * time.Second)
@@ -37,7 +37,7 @@ func TestManager_ShouldRetryAfterError_RespectsAuthRequestRetryOverride(t *testi
 		t.Fatalf("register auth: %v", errRegister)
 	}
 
-	_, _, maxWait := m.retrySettings()
+	_, _, maxWait, _ := m.retrySettings()
 	wait, shouldRetry := m.shouldRetryAfterError(&Error{HTTPStatus: 500, Message: "boom"}, 0, []string{"claude"}, model, maxWait)
 	if shouldRetry {
 		t.Fatalf("expected shouldRetry=false for request_retry=0, got true (wait=%v)", wait)
@@ -234,7 +234,7 @@ func newCredentialRetryLimitTestManager(t *testing.T, maxRetryCredentials int) (
 	t.Helper()
 
 	m := NewManager(nil, nil, nil)
-	m.SetRetryConfig(0, 0, maxRetryCredentials)
+	m.SetRetryConfig(0, 0, maxRetryCredentials, 0)
 
 	executor := &credentialRetryLimitExecutor{id: "claude"}
 	m.RegisterExecutor(executor)

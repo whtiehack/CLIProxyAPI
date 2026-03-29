@@ -151,6 +151,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// A 1h-TTL block must not appear after a 5m-TTL block in evaluation order (tools→system→messages).
 	body = normalizeCacheControlTTL(body)
 
+	// Strip empty text content blocks to prevent Anthropic API rejection.
+	body = stripEmptyTextBlocks(body)
+
 	// Extract betas from body and convert to header
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
@@ -319,6 +322,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	// Normalize TTL values to prevent ordering violations under prompt-caching-scope-2026-01-05.
 	body = normalizeCacheControlTTL(body)
+
+	// Strip empty text content blocks to prevent Anthropic API rejection.
+	body = stripEmptyTextBlocks(body)
 
 	// Extract betas from body and convert to header
 	var extraBetas []string
@@ -1918,5 +1924,66 @@ func injectSystemCacheControl(payload []byte) []byte {
 		payload = result
 	}
 
+	return payload
+}
+
+// stripEmptyTextBlocks removes text content blocks with empty text from messages
+// to prevent Anthropic API rejection ("text content blocks must be non-empty").
+// This occurs when clients (e.g. Claude Code) include empty text blocks alongside
+// tool_use blocks in assistant messages during multi-turn conversations.
+func stripEmptyTextBlocks(payload []byte) []byte {
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return payload
+	}
+
+	type fix struct {
+		msgIdx int
+		kept   []json.RawMessage
+	}
+	var fixes []fix
+
+	var msgIdx int
+	messages.ForEach(func(_, msg gjson.Result) bool {
+		defer func() { msgIdx++ }()
+		content := msg.Get("content")
+		if !content.Exists() || !content.IsArray() {
+			return true
+		}
+		hasEmpty := false
+		content.ForEach(func(_, block gjson.Result) bool {
+			if block.Get("type").String() == "text" && block.Get("text").String() == "" {
+				hasEmpty = true
+				return false
+			}
+			return true
+		})
+		if !hasEmpty {
+			return true
+		}
+		var kept []json.RawMessage
+		content.ForEach(func(_, block gjson.Result) bool {
+			if block.Get("type").String() == "text" && block.Get("text").String() == "" {
+				return true // skip empty text block
+			}
+			kept = append(kept, json.RawMessage(block.Raw))
+			return true
+		})
+		if len(kept) == 0 {
+			return true // don't remove all blocks
+		}
+		fixes = append(fixes, fix{msgIdx: msgIdx, kept: kept})
+		return true
+	})
+
+	if len(fixes) == 0 {
+		return payload
+	}
+	for _, f := range fixes {
+		result, err := sjson.SetBytes(payload, fmt.Sprintf("messages.%d.content", f.msgIdx), f.kept)
+		if err == nil {
+			payload = result
+		}
+	}
 	return payload
 }

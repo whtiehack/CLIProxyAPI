@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -550,6 +551,14 @@ var errStreamStall = &Error{
 	HTTPStatus: 502,
 }
 
+// isNetworkTimeout reports whether err is a network-level timeout (e.g.
+// ResponseHeaderTimeout). Context cancellations are NOT network timeouts;
+// callers should check ctx.Err() before calling this.
+func isNetworkTimeout(err error) bool {
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
 func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamChunk, stallTimeout time.Duration) ([]cliproxyexecutor.StreamChunk, bool, error) {
 	if ch == nil {
 		return nil, true, nil
@@ -667,6 +676,15 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		if errStream != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
 				return nil, errCtx
+			}
+			// Detect response header timeout: upstream didn't send HTTP headers
+			// within stall-timeout-seconds. Treat as stream stall to suspend the key.
+			if stallTimeout > 0 && isNetworkTimeout(errStream) {
+				log.Warnf("[stream_stall] auth=%s model=%s: upstream response header timeout, suspending for 30m", auth.ID, resultModel)
+				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: errStreamStall}
+				m.MarkResult(ctx, result)
+				lastErr = errStreamStall
+				continue
 			}
 			rerr := &Error{Message: errStream.Error()}
 			if se, ok := errors.AsType[cliproxyexecutor.StatusError](errStream); ok && se != nil {

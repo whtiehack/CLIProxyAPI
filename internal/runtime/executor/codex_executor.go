@@ -343,6 +343,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	})
 
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	if e.cfg != nil && e.cfg.Streaming.StallTimeoutSeconds > 0 {
+		applyResponseHeaderTimeout(httpClient, time.Duration(e.cfg.Streaming.StallTimeoutSeconds)*time.Second)
+	}
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)

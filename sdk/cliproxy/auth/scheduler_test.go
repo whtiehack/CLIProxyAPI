@@ -271,7 +271,7 @@ func TestSchedulerPick_MixedProvidersFallsBackAfterPinnedAuthWasTried(t *testing
 	}
 }
 
-func TestSchedulerPick_MixedProvidersUsesProviderRotationOverReadyCandidates(t *testing.T) {
+func TestSchedulerPick_MixedProvidersUsesWeightedProviderRotationOverReadyCandidates(t *testing.T) {
 	t.Parallel()
 
 	scheduler := newSchedulerForTest(
@@ -281,8 +281,8 @@ func TestSchedulerPick_MixedProvidersUsesProviderRotationOverReadyCandidates(t *
 		&Auth{ID: "claude-a", Provider: "claude"},
 	)
 
-	wantProviders := []string{"gemini", "claude", "gemini", "claude"}
-	wantIDs := []string{"gemini-a", "claude-a", "gemini-b", "claude-a"}
+	wantProviders := []string{"gemini", "gemini", "claude", "gemini"}
+	wantIDs := []string{"gemini-a", "gemini-b", "claude-a", "gemini-a"}
 	for index := range wantProviders {
 		got, provider, errPick := scheduler.pickMixed(context.Background(), []string{"gemini", "claude"}, "", cliproxyexecutor.Options{}, nil)
 		if errPick != nil {
@@ -335,7 +335,7 @@ func TestSchedulerPick_MixedProvidersPrefersHighestPriorityTier(t *testing.T) {
 	}
 }
 
-func TestManager_PickNextMixed_UsesProviderRotationBeforeCredentialRotation(t *testing.T) {
+func TestManager_PickNextMixed_UsesWeightedProviderRotationBeforeCredentialRotation(t *testing.T) {
 	t.Parallel()
 
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)
@@ -351,8 +351,8 @@ func TestManager_PickNextMixed_UsesProviderRotationBeforeCredentialRotation(t *t
 		t.Fatalf("Register(claude-a) error = %v", errRegister)
 	}
 
-	wantProviders := []string{"gemini", "claude", "gemini", "claude"}
-	wantIDs := []string{"gemini-a", "claude-a", "gemini-b", "claude-a"}
+	wantProviders := []string{"gemini", "gemini", "claude", "gemini"}
+	wantIDs := []string{"gemini-a", "gemini-b", "claude-a", "gemini-a"}
 	for index := range wantProviders {
 		got, _, provider, errPick := manager.pickNextMixed(context.Background(), []string{"gemini", "claude"}, "", cliproxyexecutor.Options{}, map[string]struct{}{})
 		if errPick != nil {
@@ -462,8 +462,8 @@ func TestManager_PickNextMixed_UsesSchedulerRotation(t *testing.T) {
 		t.Fatalf("Register(claude-a) error = %v", errRegister)
 	}
 
-	wantProviders := []string{"gemini", "claude", "gemini", "claude"}
-	wantIDs := []string{"gemini-a", "claude-a", "gemini-b", "claude-a"}
+	wantProviders := []string{"gemini", "gemini", "claude", "gemini"}
+	wantIDs := []string{"gemini-a", "gemini-b", "claude-a", "gemini-a"}
 	for index := range wantProviders {
 		got, _, provider, errPick := manager.pickNextMixed(context.Background(), []string{"gemini", "claude"}, "", cliproxyexecutor.Options{}, nil)
 		if errPick != nil {

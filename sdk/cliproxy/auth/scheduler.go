@@ -305,49 +305,26 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
 	}
 
+	// Equal-weight round-robin across providers: each provider with ready keys gets
+	// one turn regardless of how many keys it has. Key rotation within the selected
+	// provider is handled by the shard's own readyView cursor.
 	cursorKey := strings.Join(normalized, ",") + ":" + modelKey
-	weights := make([]int, len(normalized))
-	segmentStarts := make([]int, len(normalized))
-	segmentEnds := make([]int, len(normalized))
-	totalWeight := 0
-	for providerIndex, shard := range candidateShards {
-		segmentStarts[providerIndex] = totalWeight
-		if shard != nil {
-			weights[providerIndex] = shard.readyCountAtPriorityLocked(false, bestPriority)
-		}
-		totalWeight += weights[providerIndex]
-		segmentEnds[providerIndex] = totalWeight
-	}
-	if totalWeight == 0 {
-		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
-	}
-
-	startSlot := s.mixedCursors[cursorKey] % totalWeight
-	startProviderIndex := -1
+	eligible := make([]int, 0, len(normalized))
 	for providerIndex := range normalized {
-		if weights[providerIndex] == 0 {
-			continue
-		}
-		if startSlot < segmentEnds[providerIndex] {
-			startProviderIndex = providerIndex
-			break
+		shard := candidateShards[providerIndex]
+		if shard != nil && shard.readyCountAtPriorityLocked(false, bestPriority) > 0 {
+			eligible = append(eligible, providerIndex)
 		}
 	}
-	if startProviderIndex < 0 {
+	if len(eligible) == 0 {
 		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
 	}
 
-	slot := startSlot
-	for offset := 0; offset < len(normalized); offset++ {
-		providerIndex := (startProviderIndex + offset) % len(normalized)
-		if weights[providerIndex] == 0 {
-			continue
-		}
-		if providerIndex != startProviderIndex {
-			slot = segmentStarts[providerIndex]
-		}
-		providerKey := normalized[providerIndex]
-		shard := candidateShards[providerIndex]
+	startOffset := s.mixedCursors[cursorKey] % len(eligible)
+	for i := 0; i < len(eligible); i++ {
+		idx := eligible[(startOffset+i)%len(eligible)]
+		providerKey := normalized[idx]
+		shard := candidateShards[idx]
 		if shard == nil {
 			continue
 		}
@@ -355,7 +332,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		if picked == nil {
 			continue
 		}
-		s.mixedCursors[cursorKey] = slot + 1
+		s.mixedCursors[cursorKey] = startOffset + i + 1
 		return picked, providerKey, nil
 	}
 	return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
@@ -823,7 +800,41 @@ func (m *modelScheduler) availabilitySummaryLocked(predicate func(*scheduledAuth
 }
 
 // rebuildIndexesLocked reconstructs ready and blocked views from the current entry map.
+// Round-robin cursors are preserved across rebuilds so that frequent state changes
+// (e.g. cooldown promotions) do not reset rotation and starve keys.
 func (m *modelScheduler) rebuildIndexesLocked() {
+	// Snapshot old cursors before discarding the ready buckets.
+	type savedCursors struct {
+		allCursor, allParentCursor       int
+		wsCursor, wsParentCursor         int
+		allChildren, wsChildren          map[string]int
+	}
+	oldCursors := make(map[int]*savedCursors, len(m.readyByPriority))
+	for priority, bucket := range m.readyByPriority {
+		if bucket == nil {
+			continue
+		}
+		sc := &savedCursors{
+			allCursor:       bucket.all.cursor,
+			allParentCursor: bucket.all.parentCursor,
+			wsCursor:        bucket.ws.cursor,
+			wsParentCursor:  bucket.ws.parentCursor,
+		}
+		if len(bucket.all.children) > 0 {
+			sc.allChildren = make(map[string]int, len(bucket.all.children))
+			for k, v := range bucket.all.children {
+				sc.allChildren[k] = v.cursor
+			}
+		}
+		if len(bucket.ws.children) > 0 {
+			sc.wsChildren = make(map[string]int, len(bucket.ws.children))
+			for k, v := range bucket.ws.children {
+				sc.wsChildren[k] = v.cursor
+			}
+		}
+		oldCursors[priority] = sc
+	}
+
 	m.readyByPriority = make(map[int]*readyBucket)
 	m.priorityOrder = m.priorityOrder[:0]
 	m.blocked = m.blocked[:0]
@@ -846,6 +857,16 @@ func (m *modelScheduler) rebuildIndexesLocked() {
 		})
 		m.readyByPriority[priority] = buildReadyBucket(entries)
 		m.priorityOrder = append(m.priorityOrder, priority)
+	}
+
+	// Restore cursors (mod to new length so they stay in bounds).
+	for priority, bucket := range m.readyByPriority {
+		sc := oldCursors[priority]
+		if sc == nil {
+			continue
+		}
+		restoreViewCursors(&bucket.all, sc.allCursor, sc.allParentCursor, sc.allChildren)
+		restoreViewCursors(&bucket.ws, sc.wsCursor, sc.wsParentCursor, sc.wsChildren)
 	}
 	sort.Slice(m.priorityOrder, func(i, j int) bool {
 		return m.priorityOrder[i] > m.priorityOrder[j]
@@ -943,6 +964,23 @@ func (v *readyView) pickRoundRobin(predicate func(*scheduledAuth) bool) *schedul
 		return entry
 	}
 	return nil
+}
+
+// restoreViewCursors applies saved cursor positions to a rebuilt readyView.
+func restoreViewCursors(v *readyView, flatCursor, parentCursor int, childCursors map[string]int) {
+	if len(v.flat) > 0 {
+		v.cursor = flatCursor % len(v.flat)
+	}
+	if len(v.parentOrder) > 0 {
+		v.parentCursor = parentCursor % len(v.parentOrder)
+	}
+	for name, cb := range v.children {
+		if cb != nil && len(cb.items) > 0 {
+			if old, ok := childCursors[name]; ok {
+				cb.cursor = old % len(cb.items)
+			}
+		}
+	}
 }
 
 // pickGroupedRoundRobin rotates across parents first and then within the selected parent.

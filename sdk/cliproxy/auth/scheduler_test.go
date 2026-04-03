@@ -208,37 +208,33 @@ func TestSchedulerPick_CodexWebsocketPrefersWebsocketEnabledSubset(t *testing.T)
 	}
 }
 
-func TestSchedulerPick_SingleProviderFallsBackAfterPinnedAuthWasTried(t *testing.T) {
+func TestSchedulerPick_CodexWebsocketPrefersWebsocketEnabledAcrossPriorities(t *testing.T) {
 	t.Parallel()
 
-	model := "gpt-5.3-codex"
-	registerSchedulerModels(t, "codex", model, "codex-a", "codex-b")
 	scheduler := newSchedulerForTest(
 		&RoundRobinSelector{},
-		&Auth{ID: "codex-a", Provider: "codex"},
-		&Auth{ID: "codex-b", Provider: "codex"},
+		&Auth{ID: "codex-http", Provider: "codex", Attributes: map[string]string{"priority": "10"}},
+		&Auth{ID: "codex-ws-a", Provider: "codex", Attributes: map[string]string{"priority": "0", "websockets": "true"}},
+		&Auth{ID: "codex-ws-b", Provider: "codex", Attributes: map[string]string{"priority": "0", "websockets": "true"}},
 	)
 
-	opts := cliproxyexecutor.Options{
-		Metadata: map[string]any{
-			cliproxyexecutor.PinnedAuthMetadataKey: "codex-a",
-		},
-	}
-	tried := map[string]struct{}{"codex-a": {}}
-
-	got, errPick := scheduler.pickSingle(context.Background(), "codex", model, opts, tried)
-	if errPick != nil {
-		t.Fatalf("pickSingle() error = %v", errPick)
-	}
-	if got == nil {
-		t.Fatalf("pickSingle() auth = nil")
-	}
-	if got.ID != "codex-b" {
-		t.Fatalf("pickSingle() auth.ID = %q, want %q", got.ID, "codex-b")
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+	want := []string{"codex-ws-a", "codex-ws-b", "codex-ws-a"}
+	for index, wantID := range want {
+		got, errPick := scheduler.pickSingle(ctx, "codex", "", cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickSingle() #%d error = %v", index, errPick)
+		}
+		if got == nil {
+			t.Fatalf("pickSingle() #%d auth = nil", index)
+		}
+		if got.ID != wantID {
+			t.Fatalf("pickSingle() #%d auth.ID = %q, want %q", index, got.ID, wantID)
+		}
 	}
 }
 
-func TestSchedulerPick_MixedProvidersFallsBackAfterPinnedAuthWasTried(t *testing.T) {
+func TestSchedulerPick_SingleProviderReturnsErrorWhenPinnedAuthWasTried(t *testing.T) {
 	t.Parallel()
 
 	model := "gpt-5.3-codex"
@@ -256,18 +252,33 @@ func TestSchedulerPick_MixedProvidersFallsBackAfterPinnedAuthWasTried(t *testing
 	}
 	tried := map[string]struct{}{"codex-a": {}}
 
-	got, providerKey, errPick := scheduler.pickMixed(context.Background(), []string{"codex"}, model, opts, tried)
-	if errPick != nil {
-		t.Fatalf("pickMixed() error = %v", errPick)
+	_, errPick := scheduler.pickSingle(context.Background(), "codex", model, opts, tried)
+	if errPick == nil {
+		t.Fatalf("pickSingle() expected error when pinned auth was already tried")
 	}
-	if providerKey != "codex" {
-		t.Fatalf("pickMixed() provider = %q, want %q", providerKey, "codex")
+}
+
+func TestSchedulerPick_MixedProvidersReturnsErrorWhenPinnedAuthWasTried(t *testing.T) {
+	t.Parallel()
+
+	model := "gpt-5.3-codex"
+	registerSchedulerModels(t, "codex", model, "codex-a", "codex-b")
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: "codex-a", Provider: "codex"},
+		&Auth{ID: "codex-b", Provider: "codex"},
+	)
+
+	opts := cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.PinnedAuthMetadataKey: "codex-a",
+		},
 	}
-	if got == nil {
-		t.Fatalf("pickMixed() auth = nil")
-	}
-	if got.ID != "codex-b" {
-		t.Fatalf("pickMixed() auth.ID = %q, want %q", got.ID, "codex-b")
+	tried := map[string]struct{}{"codex-a": {}}
+
+	_, _, errPick := scheduler.pickMixed(context.Background(), []string{"codex"}, model, opts, tried)
+	if errPick == nil {
+		t.Fatalf("pickMixed() expected error when pinned auth was already tried")
 	}
 }
 

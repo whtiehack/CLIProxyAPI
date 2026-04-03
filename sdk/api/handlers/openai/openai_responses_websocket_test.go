@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -391,54 +392,147 @@ func TestAppendWebsocketEvent(t *testing.T) {
 	}
 }
 
-func TestAppendWebsocketEventTruncatesAtLimit(t *testing.T) {
+func TestAppendWebsocketTimelineEvent(t *testing.T) {
 	var builder strings.Builder
-	payload := bytes.Repeat([]byte("x"), wsBodyLogMaxSize)
+	ts := time.Date(2026, time.April, 1, 12, 34, 56, 789000000, time.UTC)
 
-	appendWebsocketEvent(&builder, "request", payload)
+	appendWebsocketTimelineEvent(&builder, "request", []byte("  {\"type\":\"response.create\"}\n"), ts)
 
 	got := builder.String()
-	if len(got) > wsBodyLogMaxSize {
-		t.Fatalf("body log len = %d, want <= %d", len(got), wsBodyLogMaxSize)
+	if !strings.Contains(got, "Timestamp: 2026-04-01T12:34:56.789Z") {
+		t.Fatalf("timeline timestamp not found: %s", got)
 	}
-	if !strings.Contains(got, wsBodyLogTruncated) {
-		t.Fatalf("expected truncation marker in body log")
+	if !strings.Contains(got, "Event: websocket.request") {
+		t.Fatalf("timeline event not found: %s", got)
 	}
-}
-
-func TestAppendWebsocketEventNoGrowthAfterLimit(t *testing.T) {
-	var builder strings.Builder
-	appendWebsocketEvent(&builder, "request", bytes.Repeat([]byte("x"), wsBodyLogMaxSize))
-	initial := builder.String()
-
-	appendWebsocketEvent(&builder, "response", []byte(`{"type":"response.completed"}`))
-
-	if builder.String() != initial {
-		t.Fatalf("builder grew after reaching limit")
+	if !strings.Contains(got, "{\"type\":\"response.create\"}") {
+		t.Fatalf("timeline payload not found: %s", got)
 	}
 }
 
-func TestSetWebsocketRequestBody(t *testing.T) {
+func TestSetWebsocketTimelineBody(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 
-	setWebsocketRequestBody(c, " \n ")
-	if _, exists := c.Get(wsRequestBodyKey); exists {
-		t.Fatalf("request body key should not be set for empty body")
+	setWebsocketTimelineBody(c, " \n ")
+	if _, exists := c.Get(wsTimelineBodyKey); exists {
+		t.Fatalf("timeline body key should not be set for empty body")
 	}
 
-	setWebsocketRequestBody(c, "event body")
-	value, exists := c.Get(wsRequestBodyKey)
+	setWebsocketTimelineBody(c, "timeline body")
+	value, exists := c.Get(wsTimelineBodyKey)
 	if !exists {
-		t.Fatalf("request body key not set")
+		t.Fatalf("timeline body key not set")
 	}
 	bodyBytes, ok := value.([]byte)
 	if !ok {
-		t.Fatalf("request body key type mismatch")
+		t.Fatalf("timeline body key type mismatch")
 	}
-	if string(bodyBytes) != "event body" {
-		t.Fatalf("request body = %q, want %q", string(bodyBytes), "event body")
+	if string(bodyBytes) != "timeline body" {
+		t.Fatalf("timeline body = %q, want %q", string(bodyBytes), "timeline body")
+	}
+}
+
+func TestRepairResponsesWebsocketToolCallsInsertsCachedOutput(t *testing.T) {
+	cache := newWebsocketToolOutputCache(time.Minute, 10)
+	sessionKey := "session-1"
+
+	cacheWarm := []byte(`{"previous_response_id":"resp-1","input":[{"type":"function_call_output","call_id":"call-1","output":"ok"}]}`)
+	warmed := repairResponsesWebsocketToolCallsWithCache(cache, sessionKey, cacheWarm)
+	if gjson.GetBytes(warmed, "input.0.call_id").String() != "call-1" {
+		t.Fatalf("expected warmup output to remain")
+	}
+
+	raw := []byte(`{"input":[{"type":"function_call","call_id":"call-1","name":"tool"},{"type":"message","id":"msg-1"}]}`)
+	repaired := repairResponsesWebsocketToolCallsWithCache(cache, sessionKey, raw)
+
+	input := gjson.GetBytes(repaired, "input").Array()
+	if len(input) != 3 {
+		t.Fatalf("repaired input len = %d, want 3", len(input))
+	}
+	if input[0].Get("type").String() != "function_call" || input[0].Get("call_id").String() != "call-1" {
+		t.Fatalf("unexpected first item: %s", input[0].Raw)
+	}
+	if input[1].Get("type").String() != "function_call_output" || input[1].Get("call_id").String() != "call-1" {
+		t.Fatalf("missing inserted output: %s", input[1].Raw)
+	}
+	if input[2].Get("type").String() != "message" || input[2].Get("id").String() != "msg-1" {
+		t.Fatalf("unexpected trailing item: %s", input[2].Raw)
+	}
+}
+
+func TestRepairResponsesWebsocketToolCallsDropsOrphanFunctionCall(t *testing.T) {
+	cache := newWebsocketToolOutputCache(time.Minute, 10)
+	sessionKey := "session-1"
+
+	raw := []byte(`{"input":[{"type":"function_call","call_id":"call-1","name":"tool"},{"type":"message","id":"msg-1"}]}`)
+	repaired := repairResponsesWebsocketToolCallsWithCache(cache, sessionKey, raw)
+
+	input := gjson.GetBytes(repaired, "input").Array()
+	if len(input) != 1 {
+		t.Fatalf("repaired input len = %d, want 1", len(input))
+	}
+	if input[0].Get("type").String() != "message" || input[0].Get("id").String() != "msg-1" {
+		t.Fatalf("unexpected remaining item: %s", input[0].Raw)
+	}
+}
+
+func TestRepairResponsesWebsocketToolCallsInsertsCachedCallForOrphanOutput(t *testing.T) {
+	outputCache := newWebsocketToolOutputCache(time.Minute, 10)
+	callCache := newWebsocketToolOutputCache(time.Minute, 10)
+	sessionKey := "session-1"
+
+	callCache.record(sessionKey, "call-1", []byte(`{"type":"function_call","call_id":"call-1","name":"tool"}`))
+
+	raw := []byte(`{"input":[{"type":"function_call_output","call_id":"call-1","output":"ok"},{"type":"message","id":"msg-1"}]}`)
+	repaired := repairResponsesWebsocketToolCallsWithCaches(outputCache, callCache, sessionKey, raw)
+
+	input := gjson.GetBytes(repaired, "input").Array()
+	if len(input) != 3 {
+		t.Fatalf("repaired input len = %d, want 3", len(input))
+	}
+	if input[0].Get("type").String() != "function_call" || input[0].Get("call_id").String() != "call-1" {
+		t.Fatalf("missing inserted call: %s", input[0].Raw)
+	}
+	if input[1].Get("type").String() != "function_call_output" || input[1].Get("call_id").String() != "call-1" {
+		t.Fatalf("unexpected output item: %s", input[1].Raw)
+	}
+	if input[2].Get("type").String() != "message" || input[2].Get("id").String() != "msg-1" {
+		t.Fatalf("unexpected trailing item: %s", input[2].Raw)
+	}
+}
+
+func TestRepairResponsesWebsocketToolCallsDropsOrphanOutputWhenCallMissing(t *testing.T) {
+	outputCache := newWebsocketToolOutputCache(time.Minute, 10)
+	callCache := newWebsocketToolOutputCache(time.Minute, 10)
+	sessionKey := "session-1"
+
+	raw := []byte(`{"input":[{"type":"function_call_output","call_id":"call-1","output":"ok"},{"type":"message","id":"msg-1"}]}`)
+	repaired := repairResponsesWebsocketToolCallsWithCaches(outputCache, callCache, sessionKey, raw)
+
+	input := gjson.GetBytes(repaired, "input").Array()
+	if len(input) != 1 {
+		t.Fatalf("repaired input len = %d, want 1", len(input))
+	}
+	if input[0].Get("type").String() != "message" || input[0].Get("id").String() != "msg-1" {
+		t.Fatalf("unexpected remaining item: %s", input[0].Raw)
+	}
+}
+
+func TestRecordResponsesWebsocketToolCallsFromPayloadWithCache(t *testing.T) {
+	cache := newWebsocketToolOutputCache(time.Minute, 10)
+	sessionKey := "session-1"
+
+	payload := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[{"type":"function_call","id":"fc-1","call_id":"call-1","name":"tool","arguments":"{}"}]}}`)
+	recordResponsesWebsocketToolCallsFromPayloadWithCache(cache, sessionKey, payload)
+
+	cached, ok := cache.get(sessionKey, "call-1")
+	if !ok {
+		t.Fatalf("expected cached tool call")
+	}
+	if gjson.GetBytes(cached, "type").String() != "function_call" || gjson.GetBytes(cached, "call_id").String() != "call-1" {
+		t.Fatalf("unexpected cached tool call: %s", cached)
 	}
 }
 
@@ -468,14 +562,14 @@ func TestForwardResponsesWebsocketPreservesCompletedEvent(t *testing.T) {
 		close(data)
 		close(errCh)
 
-		var bodyLog strings.Builder
+		var timelineLog strings.Builder
 		completedOutput, err := (*OpenAIResponsesAPIHandler)(nil).forwardResponsesWebsocket(
 			ctx,
 			conn,
 			func(...interface{}) {},
 			data,
 			errCh,
-			&bodyLog,
+			&timelineLog,
 			"session-1",
 		)
 		if err != nil {
@@ -484,6 +578,10 @@ func TestForwardResponsesWebsocketPreservesCompletedEvent(t *testing.T) {
 		}
 		if gjson.GetBytes(completedOutput, "0.id").String() != "out-1" {
 			serverErrCh <- errors.New("completed output not captured")
+			return
+		}
+		if !strings.Contains(timelineLog.String(), "Event: websocket.response") {
+			serverErrCh <- errors.New("websocket timeline did not capture downstream response")
 			return
 		}
 		serverErrCh <- nil
@@ -515,6 +613,116 @@ func TestForwardResponsesWebsocketPreservesCompletedEvent(t *testing.T) {
 
 	if errServer := <-serverErrCh; errServer != nil {
 		t.Fatalf("server error: %v", errServer)
+	}
+}
+
+func TestForwardResponsesWebsocketLogsAttemptedResponseOnWriteFailure(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	serverErrCh := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := responsesWebsocketUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			serverErrCh <- err
+			return
+		}
+
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ctx.Request = r
+
+		data := make(chan []byte, 1)
+		errCh := make(chan *interfaces.ErrorMessage)
+		data <- []byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"output\":[{\"type\":\"message\",\"id\":\"out-1\"}]}}\n\n")
+		close(data)
+		close(errCh)
+
+		var timelineLog strings.Builder
+		if errClose := conn.Close(); errClose != nil {
+			serverErrCh <- errClose
+			return
+		}
+
+		_, err = (*OpenAIResponsesAPIHandler)(nil).forwardResponsesWebsocket(
+			ctx,
+			conn,
+			func(...interface{}) {},
+			data,
+			errCh,
+			&timelineLog,
+			"session-1",
+		)
+		if err == nil {
+			serverErrCh <- errors.New("expected websocket write failure")
+			return
+		}
+		if !strings.Contains(timelineLog.String(), "Event: websocket.response") {
+			serverErrCh <- errors.New("websocket timeline did not capture attempted downstream response")
+			return
+		}
+		if !strings.Contains(timelineLog.String(), "\"type\":\"response.completed\"") {
+			serverErrCh <- errors.New("websocket timeline did not retain attempted payload")
+			return
+		}
+		serverErrCh <- nil
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() {
+		_ = conn.Close()
+	}()
+
+	if errServer := <-serverErrCh; errServer != nil {
+		t.Fatalf("server error: %v", errServer)
+	}
+}
+
+func TestResponsesWebsocketTimelineRecordsDisconnectEvent(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+
+	timelineCh := make(chan string, 1)
+	router := gin.New()
+	router.GET("/v1/responses/ws", func(c *gin.Context) {
+		h.ResponsesWebsocket(c)
+		timeline := ""
+		if value, exists := c.Get(wsTimelineBodyKey); exists {
+			if body, ok := value.([]byte); ok {
+				timeline = string(body)
+			}
+		}
+		timelineCh <- timeline
+	})
+
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+
+	closePayload := websocket.FormatCloseMessage(websocket.CloseGoingAway, "client closing")
+	if err = conn.WriteControl(websocket.CloseMessage, closePayload, time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("write close control: %v", err)
+	}
+	_ = conn.Close()
+
+	select {
+	case timeline := <-timelineCh:
+		if !strings.Contains(timeline, "Event: websocket.disconnect") {
+			t.Fatalf("websocket timeline missing disconnect event: %s", timeline)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for websocket timeline")
 	}
 }
 
@@ -645,6 +853,31 @@ func TestResponsesWebsocketPrewarmHandledLocallyForSSEUpstream(t *testing.T) {
 	}
 }
 
+func TestWebsocketClientAddressUsesGinClientIP(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	recorder := httptest.NewRecorder()
+	c, engine := gin.CreateTestContext(recorder)
+	if err := engine.SetTrustedProxies([]string{"0.0.0.0/0", "::/0"}); err != nil {
+		t.Fatalf("SetTrustedProxies: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/responses/ws", nil)
+	req.RemoteAddr = "172.18.0.1:34282"
+	req.Header.Set("X-Forwarded-For", "203.0.113.7")
+	c.Request = req
+
+	if got := websocketClientAddress(c); got != strings.TrimSpace(c.ClientIP()) {
+		t.Fatalf("websocketClientAddress = %q, ClientIP = %q", got, c.ClientIP())
+	}
+}
+
+func TestWebsocketClientAddressReturnsEmptyForNilContext(t *testing.T) {
+	if got := websocketClientAddress(nil); got != "" {
+		t.Fatalf("websocketClientAddress(nil) = %q, want empty", got)
+	}
+}
+
 func TestResponsesWebsocketPinsOnlyWebsocketCapableAuth(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -764,6 +997,29 @@ func TestNormalizeResponsesWebsocketRequestDoesNotTreatDeveloperMessageAsReplace
 	}
 	if !bytes.Equal(next, normalized) {
 		t.Fatalf("next request snapshot should match merged request")
+	}
+}
+
+func TestNormalizeResponsesWebsocketRequestDropsDuplicateFunctionCallsByCallID(t *testing.T) {
+	lastRequest := []byte(`{"model":"test-model","stream":true,"input":[{"type":"function_call","id":"fc-1","call_id":"call-1"},{"type":"function_call_output","id":"tool-out-1","call_id":"call-1"}]}`)
+	lastResponseOutput := []byte(`[
+		{"type":"function_call","id":"fc-1","call_id":"call-1","name":"tool"}
+	]`)
+	raw := []byte(`{"type":"response.create","input":[{"type":"message","id":"msg-2"}]}`)
+
+	normalized, _, errMsg := normalizeResponsesWebsocketRequest(raw, lastRequest, lastResponseOutput)
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+
+	items := gjson.GetBytes(normalized, "input").Array()
+	if len(items) != 3 {
+		t.Fatalf("merged input len = %d, want 3: %s", len(items), normalized)
+	}
+	if items[0].Get("id").String() != "fc-1" ||
+		items[1].Get("id").String() != "tool-out-1" ||
+		items[2].Get("id").String() != "msg-2" {
+		t.Fatalf("unexpected merged input order: %s", normalized)
 	}
 }
 

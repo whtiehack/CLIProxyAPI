@@ -1,4 +1,4 @@
-package executor
+package helps
 
 import (
 	"context"
@@ -12,7 +12,7 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// newProxyAwareHTTPClient creates an HTTP client with proper proxy configuration priority:
+// NewProxyAwareHTTPClient creates an HTTP client with proper proxy configuration priority:
 // 1. Use auth.ProxyURL if configured (highest priority)
 // 2. Use cfg.ProxyURL if auth proxy is not configured
 // 3. Use RoundTripper from context if neither are configured
@@ -25,7 +25,7 @@ import (
 //
 // Returns:
 //   - *http.Client: An HTTP client with configured proxy or transport
-func newProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
+func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
 	httpClient := &http.Client{}
 	if timeout > 0 {
 		httpClient.Timeout = timeout
@@ -61,11 +61,11 @@ func newProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	return httpClient
 }
 
-// applyResponseHeaderTimeout configures ResponseHeaderTimeout on the client's
+// ApplyResponseHeaderTimeout configures ResponseHeaderTimeout on the client's
 // transport so that if the upstream does not send response headers within the
 // given duration, httpClient.Do returns a timeout error. This only affects the
 // wait for response headers, not body reading.
-func applyResponseHeaderTimeout(client *http.Client, timeout time.Duration) {
+func ApplyResponseHeaderTimeout(client *http.Client, timeout time.Duration) {
 	if timeout <= 0 {
 		return
 	}
@@ -74,6 +74,12 @@ func applyResponseHeaderTimeout(client *http.Client, timeout time.Duration) {
 		cloned := t.Clone()
 		cloned.ResponseHeaderTimeout = timeout
 		client.Transport = cloned
+	case *fallbackRoundTripper:
+		if fb, ok := t.fallback.(*http.Transport); ok {
+			cloned := fb.Clone()
+			cloned.ResponseHeaderTimeout = timeout
+			t.fallback = cloned
+		}
 	case nil:
 		cloned := http.DefaultTransport.(*http.Transport).Clone()
 		cloned.ResponseHeaderTimeout = timeout

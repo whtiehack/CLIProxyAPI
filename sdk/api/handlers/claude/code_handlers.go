@@ -34,8 +34,9 @@ import (
 // ClaudeCodeAPIHandler contains the handlers for Claude API endpoints.
 // It holds a pool of clients to interact with the backend service.
 const (
-	claudeAuthPinTTL        = 30 * time.Minute
-	claudeAuthPinTTLSlow    = 5 * time.Minute
+	claudeAuthPinTTL        = 60 * time.Minute
+	claudeAuthPinTTLLong    = 30 * time.Minute
+	claudeAuthPinLongThresh = 60 * time.Second
 	claudeAuthPinSlowThresh = 3 * time.Minute
 	claudeAuthPinGCInterval = 5 * time.Minute
 )
@@ -107,8 +108,8 @@ func (s *claudeAuthPinStore) updateAfterRequest(key, authID string, duration tim
 	}
 	if duration > claudeAuthPinSlowThresh {
 		s.delete(key)
-	} else if duration > 10*time.Second {
-		s.setWithTTL(key, authID, claudeAuthPinTTLSlow)
+	} else if duration > claudeAuthPinLongThresh {
+		s.setWithTTL(key, authID, claudeAuthPinTTLLong)
 	} else {
 		s.set(key, authID)
 	}

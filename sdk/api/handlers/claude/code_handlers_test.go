@@ -145,3 +145,49 @@ func TestClaudeAuthPinning_ReusesPinnedAuthForMatchingConversation(t *testing.T)
 		t.Fatalf("expected second request to reuse pinned auth, got %v", authIDs)
 	}
 }
+
+func TestClaudeAuthPinStore_UpdateAfterRequest_ExtendsTTLByDuration(t *testing.T) {
+	resetClaudePinStore()
+	t.Cleanup(resetClaudePinStore)
+
+	key := "claude:test"
+	authID := "auth1"
+
+	claudePinStore.updateAfterRequest(key, authID, 60*time.Second)
+	claudePinStore.mu.RLock()
+	pinFast, ok := claudePinStore.pins[key]
+	claudePinStore.mu.RUnlock()
+	if !ok {
+		t.Fatalf("expected fast request pin to be stored")
+	}
+	fastRemaining := time.Until(pinFast.expiresAt)
+	if fastRemaining < 59*time.Minute || fastRemaining > 61*time.Minute {
+		t.Fatalf("expected fast request TTL around 60 minutes, got %v", fastRemaining)
+	}
+
+	claudePinStore.updateAfterRequest(key, authID, 61*time.Second)
+	claudePinStore.mu.RLock()
+	pinLong, ok := claudePinStore.pins[key]
+	claudePinStore.mu.RUnlock()
+	if !ok {
+		t.Fatalf("expected medium request pin to be stored")
+	}
+	longRemaining := time.Until(pinLong.expiresAt)
+	if longRemaining < 29*time.Minute || longRemaining > 31*time.Minute {
+		t.Fatalf("expected medium request TTL around 30 minutes, got %v", longRemaining)
+	}
+}
+
+func TestClaudeAuthPinStore_UpdateAfterRequest_DeletesSlowPins(t *testing.T) {
+	resetClaudePinStore()
+	t.Cleanup(resetClaudePinStore)
+
+	key := "claude:test"
+	authID := "auth1"
+	claudePinStore.set(key, authID)
+
+	claudePinStore.updateAfterRequest(key, authID, 3*time.Minute+time.Second)
+	if _, ok := claudePinStore.get(key); ok {
+		t.Fatalf("expected slow request pin to be deleted")
+	}
+}

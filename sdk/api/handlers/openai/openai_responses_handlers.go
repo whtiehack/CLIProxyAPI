@@ -31,10 +31,11 @@ import (
 // ---------- prompt_cache_key session affinity ----------
 
 const (
-	promptCachePinTTL        = 30 * time.Minute
-	promptCachePinTTLSlow    = 5 * time.Minute
-	promptCacheSlowThreshold = 3 * time.Minute
-	pinStoreGCInterval       = 5 * time.Minute
+	promptCachePinTTL           = 60 * time.Minute
+	promptCachePinTTLLong       = 30 * time.Minute
+	promptCachePinLongThreshold = 60 * time.Second
+	promptCacheSlowThreshold    = 3 * time.Minute
+	pinStoreGCInterval          = 5 * time.Minute
 )
 
 type pinContextKey struct{}
@@ -104,8 +105,8 @@ func (s *promptCachePinStore) updateAfterRequest(key, authID string, duration ti
 	}
 	if duration > promptCacheSlowThreshold {
 		s.delete(key)
-	} else if duration > 10*time.Second {
-		s.setWithTTL(key, authID, promptCachePinTTLSlow)
+	} else if duration > promptCachePinLongThreshold {
+		s.setWithTTL(key, authID, promptCachePinTTLLong)
 	} else {
 		s.set(key, authID)
 	}

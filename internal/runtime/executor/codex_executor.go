@@ -168,48 +168,19 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 
-	// When codex-assemble-output is enabled and the downstream client speaks
-	// OpenAI chat-completions, collect output items from intermediate SSE events
-	// so we can back-fill response.completed if its output array is empty
-	// (upstream Codex API no longer populates it in streaming mode).
-	assembleOutput := e.cfg != nil && e.cfg.Streaming.CodexAssembleOutput && from.String() == "openai"
-
 	lines := bytes.Split(data, []byte("\n"))
-	var collectedOutputItems []gjson.Result
 	for _, line := range lines {
 		if !bytes.HasPrefix(line, dataTag) {
 			continue
 		}
 
 		line = bytes.TrimSpace(line[5:])
-		eventType := gjson.GetBytes(line, "type").String()
-
-		if assembleOutput && eventType == "response.output_item.done" {
-			if item := gjson.GetBytes(line, "item"); item.Exists() {
-				collectedOutputItems = append(collectedOutputItems, item)
-			}
-			continue
-		}
-
-		if eventType != "response.completed" {
+		if gjson.GetBytes(line, "type").String() != "response.completed" {
 			continue
 		}
 
 		if detail, ok := helps.ParseCodexUsage(line); ok {
 			reporter.Publish(ctx, detail)
-		}
-
-		// Back-fill empty output array with collected items.
-		if assembleOutput && len(collectedOutputItems) > 0 {
-			outputArr := gjson.GetBytes(line, "response.output")
-			if !outputArr.Exists() || (outputArr.IsArray() && len(outputArr.Array()) == 0) {
-				arr := make([]string, 0, len(collectedOutputItems))
-				for _, item := range collectedOutputItems {
-					arr = append(arr, item.Raw)
-				}
-				assembled := "[" + strings.Join(arr, ",") + "]"
-				line, _ = sjson.SetRawBytes(line, "response.output", []byte(assembled))
-			}
 		}
 
 		var param any

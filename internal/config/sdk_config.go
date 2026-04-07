@@ -58,13 +58,4 @@ type StreamingConfig struct {
 	// is closed. This prevents requests from hanging indefinitely when upstream stops responding
 	// mid-stream. <= 0 disables idle timeout. Default is 0 (disabled).
 	StreamIdleTimeoutSeconds int `yaml:"stream-idle-timeout-seconds,omitempty" json:"stream-idle-timeout-seconds,omitempty"`
-
-	// CodexAssembleOutput works around an upstream Codex API change where the
-	// response.completed SSE event no longer contains the output array.
-	// When true, the non-streaming Codex executor collects output items from
-	// intermediate SSE events (response.output_item.done) and injects them
-	// into the response.completed payload before translation.
-	// Only affects requests originating from OpenAI chat-completions clients.
-	// Default is false (disabled).
-	CodexAssembleOutput bool `yaml:"codex-assemble-output,omitempty" json:"codex-assemble-output,omitempty"`
 }

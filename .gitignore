@@ -51,3 +51,9 @@ _bmad-output/*
 ._*
 cliproxyapi-linux-amd64
 .ace-tool/
+
+# Opencode
+.beads/
+.opencode/
+.cli-proxy-api/
+.venv/

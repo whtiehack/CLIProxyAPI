@@ -95,6 +95,9 @@ max-retry-interval: 30
 # or invalid image data). Set to 0 to stop immediately on the first such error.
 max-invalid-request-retries: 0
 
+# When true, disable auth/model cooldown scheduling globally (prevents blackout windows after failure states).
+disable-cooling: false
+
 # Quota exceeded behavior
 quota-exceeded:
   switch-project: true # Whether to automatically switch to another project when a quota is exceeded

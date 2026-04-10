@@ -67,7 +67,7 @@ func TestManager_ShouldRetryAfterError_RespectsAuthRequestRetryOverride(t *testi
 
 func TestManager_ShouldRetryAfterError_UsesOAuthModelAliasForCooldown(t *testing.T) {
 	m := NewManager(nil, nil, nil)
-	m.SetRetryConfig(3, 30*time.Second, 0)
+	m.SetRetryConfig(3, 30*time.Second, 0, 0)
 	m.SetOAuthModelAlias(map[string][]internalconfig.OAuthModelAlias{
 		"qwen": {
 			{Name: "qwen3.6-plus", Alias: "coder-model"},
@@ -791,7 +791,7 @@ func TestManager_Execute_DisableCooling_RetriesAfter429RetryAfter(t *testing.T) 
 	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
 
 	m := NewManager(nil, nil, nil)
-	m.SetRetryConfig(3, 100*time.Millisecond, 0)
+	m.SetRetryConfig(3, 100*time.Millisecond, 0, 0)
 
 	executor := &authFallbackExecutor{
 		id: "claude",

@@ -97,6 +97,72 @@ type childBucket struct {
 // cooldownQueue is the blocked auth collection ordered by next retry time during rebuilds.
 type cooldownQueue []*scheduledAuth
 
+type readyViewCursorState struct {
+	cursor       int
+	parentCursor int
+	childCursors map[string]int
+}
+
+type readyBucketCursorState struct {
+	all readyViewCursorState
+	ws  readyViewCursorState
+}
+
+func snapshotReadyViewCursors(view readyView) readyViewCursorState {
+	state := readyViewCursorState{
+		cursor:       view.cursor,
+		parentCursor: view.parentCursor,
+	}
+	if len(view.children) == 0 {
+		return state
+	}
+	state.childCursors = make(map[string]int, len(view.children))
+	for parent, child := range view.children {
+		if child == nil {
+			continue
+		}
+		state.childCursors[parent] = child.cursor
+	}
+	return state
+}
+
+func restoreReadyViewCursors(view *readyView, state readyViewCursorState) {
+	if view == nil {
+		return
+	}
+	if len(view.flat) > 0 {
+		view.cursor = normalizeCursor(state.cursor, len(view.flat))
+	}
+	if len(view.parentOrder) == 0 || len(view.children) == 0 {
+		return
+	}
+	view.parentCursor = normalizeCursor(state.parentCursor, len(view.parentOrder))
+	if len(state.childCursors) == 0 {
+		return
+	}
+	for parent, child := range view.children {
+		if child == nil || len(child.items) == 0 {
+			continue
+		}
+		cursor, ok := state.childCursors[parent]
+		if !ok {
+			continue
+		}
+		child.cursor = normalizeCursor(cursor, len(child.items))
+	}
+}
+
+func normalizeCursor(cursor, size int) int {
+	if size <= 0 || cursor <= 0 {
+		return 0
+	}
+	cursor = cursor % size
+	if cursor < 0 {
+		cursor += size
+	}
+	return cursor
+}
+
 // newAuthScheduler constructs an empty scheduler configured for the supplied selector strategy.
 func newAuthScheduler(selector Selector) *authScheduler {
 	return &authScheduler{
@@ -803,36 +869,15 @@ func (m *modelScheduler) availabilitySummaryLocked(predicate func(*scheduledAuth
 // Round-robin cursors are preserved across rebuilds so that frequent state changes
 // (e.g. cooldown promotions) do not reset rotation and starve keys.
 func (m *modelScheduler) rebuildIndexesLocked() {
-	// Snapshot old cursors before discarding the ready buckets.
-	type savedCursors struct {
-		allCursor, allParentCursor       int
-		wsCursor, wsParentCursor         int
-		allChildren, wsChildren          map[string]int
-	}
-	oldCursors := make(map[int]*savedCursors, len(m.readyByPriority))
+	cursorStates := make(map[int]readyBucketCursorState, len(m.readyByPriority))
 	for priority, bucket := range m.readyByPriority {
 		if bucket == nil {
 			continue
 		}
-		sc := &savedCursors{
-			allCursor:       bucket.all.cursor,
-			allParentCursor: bucket.all.parentCursor,
-			wsCursor:        bucket.ws.cursor,
-			wsParentCursor:  bucket.ws.parentCursor,
+		cursorStates[priority] = readyBucketCursorState{
+			all: snapshotReadyViewCursors(bucket.all),
+			ws:  snapshotReadyViewCursors(bucket.ws),
 		}
-		if len(bucket.all.children) > 0 {
-			sc.allChildren = make(map[string]int, len(bucket.all.children))
-			for k, v := range bucket.all.children {
-				sc.allChildren[k] = v.cursor
-			}
-		}
-		if len(bucket.ws.children) > 0 {
-			sc.wsChildren = make(map[string]int, len(bucket.ws.children))
-			for k, v := range bucket.ws.children {
-				sc.wsChildren[k] = v.cursor
-			}
-		}
-		oldCursors[priority] = sc
 	}
 
 	m.readyByPriority = make(map[int]*readyBucket)
@@ -855,18 +900,13 @@ func (m *modelScheduler) rebuildIndexesLocked() {
 		sort.Slice(entries, func(i, j int) bool {
 			return entries[i].auth.ID < entries[j].auth.ID
 		})
-		m.readyByPriority[priority] = buildReadyBucket(entries)
-		m.priorityOrder = append(m.priorityOrder, priority)
-	}
-
-	// Restore cursors (mod to new length so they stay in bounds).
-	for priority, bucket := range m.readyByPriority {
-		sc := oldCursors[priority]
-		if sc == nil {
-			continue
+		bucket := buildReadyBucket(entries)
+		if cursorState, ok := cursorStates[priority]; ok && bucket != nil {
+			restoreReadyViewCursors(&bucket.all, cursorState.all)
+			restoreReadyViewCursors(&bucket.ws, cursorState.ws)
 		}
-		restoreViewCursors(&bucket.all, sc.allCursor, sc.allParentCursor, sc.allChildren)
-		restoreViewCursors(&bucket.ws, sc.wsCursor, sc.wsParentCursor, sc.wsChildren)
+		m.readyByPriority[priority] = bucket
+		m.priorityOrder = append(m.priorityOrder, priority)
 	}
 	sort.Slice(m.priorityOrder, func(i, j int) bool {
 		return m.priorityOrder[i] > m.priorityOrder[j]
@@ -964,23 +1004,6 @@ func (v *readyView) pickRoundRobin(predicate func(*scheduledAuth) bool) *schedul
 		return entry
 	}
 	return nil
-}
-
-// restoreViewCursors applies saved cursor positions to a rebuilt readyView.
-func restoreViewCursors(v *readyView, flatCursor, parentCursor int, childCursors map[string]int) {
-	if len(v.flat) > 0 {
-		v.cursor = flatCursor % len(v.flat)
-	}
-	if len(v.parentOrder) > 0 {
-		v.parentCursor = parentCursor % len(v.parentOrder)
-	}
-	for name, cb := range v.children {
-		if cb != nil && len(cb.items) > 0 {
-			if old, ok := childCursors[name]; ok {
-				cb.cursor = old % len(cb.items)
-			}
-		}
-	}
 }
 
 // pickGroupedRoundRobin rotates across parents first and then within the selected parent.

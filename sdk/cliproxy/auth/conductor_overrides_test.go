@@ -98,7 +98,7 @@ func TestManager_ShouldRetryAfterError_UsesOAuthModelAliasForCooldown(t *testing
 		t.Fatalf("register auth: %v", errRegister)
 	}
 
-	_, _, maxWait := m.retrySettings()
+	_, _, maxWait, _ := m.retrySettings()
 	wait, shouldRetry := m.shouldRetryAfterError(&Error{HTTPStatus: 429, Message: "quota"}, 0, []string{"kimi"}, routeModel, maxWait)
 	if !shouldRetry {
 		t.Fatalf("expected shouldRetry=true, got false (wait=%v)", wait)

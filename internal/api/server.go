@@ -319,9 +319,16 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 // setupRoutes configures the API routes for the server.
 // It defines the endpoints and associates them with their respective handlers.
 func (s *Server) setupRoutes() {
-	s.engine.GET("/healthz", func(c *gin.Context) {
+	healthzHandler := func(c *gin.Context) {
+		if c.Request.Method == http.MethodHead {
+			c.Status(http.StatusOK)
+			return
+		}
+
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
-	})
+	}
+	s.engine.GET("/healthz", healthzHandler)
+	s.engine.HEAD("/healthz", healthzHandler)
 
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
@@ -406,20 +413,6 @@ func (s *Server) setupRoutes() {
 		}
 		if state != "" {
 			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "gemini", state, code, errStr)
-		}
-		c.Header("Content-Type", "text/html; charset=utf-8")
-		c.String(http.StatusOK, oauthCallbackSuccessHTML)
-	})
-
-	s.engine.GET("/iflow/callback", func(c *gin.Context) {
-		code := c.Query("code")
-		state := c.Query("state")
-		errStr := c.Query("error")
-		if errStr == "" {
-			errStr = c.Query("error_description")
-		}
-		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "iflow", state, code, errStr)
 		}
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
@@ -647,10 +640,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/codex-auth-url", s.mgmt.RequestCodexToken)
 		mgmt.GET("/gemini-cli-auth-url", s.mgmt.RequestGeminiCLIToken)
 		mgmt.GET("/antigravity-auth-url", s.mgmt.RequestAntigravityToken)
-		mgmt.GET("/qwen-auth-url", s.mgmt.RequestQwenToken)
 		mgmt.GET("/kimi-auth-url", s.mgmt.RequestKimiToken)
-		mgmt.GET("/iflow-auth-url", s.mgmt.RequestIFlowToken)
-		mgmt.POST("/iflow-auth-url", s.mgmt.RequestIFlowCookieToken)
 		mgmt.POST("/oauth-callback", s.mgmt.PostOAuthCallback)
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
 	}
@@ -1081,20 +1071,17 @@ func applySignatureCacheConfig(oldCfg, cfg *config.Config) {
 	if oldCfg == nil {
 		cache.SetSignatureCacheEnabled(newVal)
 		cache.SetSignatureBypassStrictMode(newStrict)
-		log.Debugf("antigravity_signature_cache_enabled toggled to %t", newVal)
 		return
 	}
 
 	oldVal := configuredSignatureCacheEnabled(oldCfg)
 	if oldVal != newVal {
 		cache.SetSignatureCacheEnabled(newVal)
-		log.Debugf("antigravity_signature_cache_enabled updated from %t to %t", oldVal, newVal)
 	}
 
 	oldStrict := configuredSignatureBypassStrict(oldCfg)
 	if oldStrict != newStrict {
 		cache.SetSignatureBypassStrictMode(newStrict)
-		log.Debugf("antigravity_signature_bypass_strict updated from %t to %t", oldStrict, newStrict)
 	}
 }
 

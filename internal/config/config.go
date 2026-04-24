@@ -404,10 +404,6 @@ type ClaudeKey struct {
 	// Cloak configures request cloaking for non-Claude-Code clients.
 	Cloak *CloakConfig `yaml:"cloak,omitempty" json:"cloak,omitempty"`
 
-	// NoToolsCacheControl disables cache_control injection on tools for this provider.
-	// Use this for upstreams that don't support Anthropic's prompt caching on tools (e.g., AWS Bedrock proxies).
-	NoToolsCacheControl bool `yaml:"no-tools-cache-control,omitempty" json:"no-tools-cache-control,omitempty"`
-
 	// ExperimentalCCHSigning enables opt-in final-body cch signing for cloaked
 	// Claude /v1/messages requests. It is disabled by default so upstream seed
 	// changes do not alter the proxy's legacy behavior.

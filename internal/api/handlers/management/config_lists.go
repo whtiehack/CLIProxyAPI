@@ -304,9 +304,6 @@ func (h *Handler) PutClaudeKeys(c *gin.Context) {
 	}
 	for i := range arr {
 		if old, ok := existing[arr[i].APIKey]; ok {
-			if !arr[i].NoToolsCacheControl && old.NoToolsCacheControl {
-				arr[i].NoToolsCacheControl = old.NoToolsCacheControl
-			}
 			if arr[i].Priority == 0 && old.Priority != 0 {
 				arr[i].Priority = old.Priority
 			}
@@ -324,16 +321,15 @@ func (h *Handler) PutClaudeKeys(c *gin.Context) {
 }
 func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	type claudeKeyPatch struct {
-		APIKey              *string               `json:"api-key"`
-		Priority            *int                  `json:"priority"`
-		Prefix              *string               `json:"prefix"`
-		BaseURL             *string               `json:"base-url"`
-		ProxyURL            *string               `json:"proxy-url"`
-		Models              *[]config.ClaudeModel `json:"models"`
-		Headers             *map[string]string    `json:"headers"`
-		ExcludedModels      *[]string             `json:"excluded-models"`
-		Cloak               *config.CloakConfig   `json:"cloak"`
-		NoToolsCacheControl *bool                 `json:"no-tools-cache-control"`
+		APIKey         *string               `json:"api-key"`
+		Priority       *int                  `json:"priority"`
+		Prefix         *string               `json:"prefix"`
+		BaseURL        *string               `json:"base-url"`
+		ProxyURL       *string               `json:"proxy-url"`
+		Models         *[]config.ClaudeModel `json:"models"`
+		Headers        *map[string]string    `json:"headers"`
+		ExcludedModels *[]string             `json:"excluded-models"`
+		Cloak          *config.CloakConfig   `json:"cloak"`
 	}
 	var body struct {
 		Index *int            `json:"index"`
@@ -392,9 +388,6 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	}
 	if body.Value.Cloak != nil {
 		entry.Cloak = body.Value.Cloak
-	}
-	if body.Value.NoToolsCacheControl != nil {
-		entry.NoToolsCacheControl = *body.Value.NoToolsCacheControl
 	}
 	normalizeClaudeKey(&entry)
 	h.cfg.ClaudeKey[targetIndex] = entry

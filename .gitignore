@@ -58,3 +58,4 @@ cliproxyapi-linux-amd64
 .opencode/
 .cli-proxy-api/
 .venv/
+.gocache/

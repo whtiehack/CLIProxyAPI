@@ -371,26 +371,49 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
 	}
 
-	// Equal-weight round-robin across providers: each provider with ready keys gets
-	// one turn regardless of how many keys it has. Key rotation within the selected
-	// provider is handled by the shard's own readyView cursor.
 	cursorKey := strings.Join(normalized, ",") + ":" + modelKey
-	eligible := make([]int, 0, len(normalized))
-	for providerIndex := range normalized {
-		shard := candidateShards[providerIndex]
-		if shard != nil && shard.readyCountAtPriorityLocked(false, bestPriority) > 0 {
-			eligible = append(eligible, providerIndex)
+	weights := make([]int, len(normalized))
+	segmentStarts := make([]int, len(normalized))
+	segmentEnds := make([]int, len(normalized))
+	totalWeight := 0
+	for providerIndex, shard := range candidateShards {
+		segmentStarts[providerIndex] = totalWeight
+		if shard != nil {
+			weights[providerIndex] = shard.readyCountAtPriorityLocked(false, bestPriority)
 		}
+		totalWeight += weights[providerIndex]
+		segmentEnds[providerIndex] = totalWeight
 	}
-	if len(eligible) == 0 {
+	if totalWeight == 0 {
 		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
 	}
 
-	startOffset := s.mixedCursors[cursorKey] % len(eligible)
-	for i := 0; i < len(eligible); i++ {
-		idx := eligible[(startOffset+i)%len(eligible)]
-		providerKey := normalized[idx]
-		shard := candidateShards[idx]
+	startSlot := s.mixedCursors[cursorKey] % totalWeight
+	startProviderIndex := -1
+	for providerIndex := range normalized {
+		if weights[providerIndex] == 0 {
+			continue
+		}
+		if startSlot < segmentEnds[providerIndex] {
+			startProviderIndex = providerIndex
+			break
+		}
+	}
+	if startProviderIndex < 0 {
+		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
+	}
+
+	slot := startSlot
+	for offset := 0; offset < len(normalized); offset++ {
+		providerIndex := (startProviderIndex + offset) % len(normalized)
+		if weights[providerIndex] == 0 {
+			continue
+		}
+		if providerIndex != startProviderIndex {
+			slot = segmentStarts[providerIndex]
+		}
+		providerKey := normalized[providerIndex]
+		shard := candidateShards[providerIndex]
 		if shard == nil {
 			continue
 		}
@@ -398,7 +421,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		if picked == nil {
 			continue
 		}
-		s.mixedCursors[cursorKey] = startOffset + i + 1
+		s.mixedCursors[cursorKey] = slot + 1
 		return picked, providerKey, nil
 	}
 	return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)

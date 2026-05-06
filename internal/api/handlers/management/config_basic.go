@@ -193,20 +193,7 @@ func (h *Handler) PutUsageStatisticsEnabled(c *gin.Context) {
 	h.updateBoolField(c, func(v bool) { h.cfg.UsageStatisticsEnabled = v })
 }
 
-// UsageStatisticsPersistInterval
-func (h *Handler) GetUsageStatisticsPersistInterval(c *gin.Context) {
-	c.JSON(200, gin.H{"usage-statistics-persist-interval-seconds": h.cfg.UsageStatisticsPersistIntervalSeconds})
-}
-func (h *Handler) PutUsageStatisticsPersistInterval(c *gin.Context) {
-	h.updateIntField(c, func(v int) {
-		if v < 0 {
-			v = 0
-		}
-		h.cfg.UsageStatisticsPersistIntervalSeconds = v
-	})
-}
-
-// LoggingToFile
+// UsageStatisticsEnabled
 func (h *Handler) GetLoggingToFile(c *gin.Context) {
 	c.JSON(200, gin.H{"logging-to-file": h.cfg.LoggingToFile})
 }

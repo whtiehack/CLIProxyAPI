@@ -65,11 +65,6 @@ type Config struct {
 	// UsageStatisticsEnabled toggles in-memory usage aggregation; when false, usage data is discarded.
 	UsageStatisticsEnabled bool `yaml:"usage-statistics-enabled" json:"usage-statistics-enabled"`
 
-	// UsageStatisticsPersistIntervalSeconds controls how often usage statistics
-	// are automatically flushed to disk. Set to 0 to disable periodic flushes
-	// while still allowing startup restore and shutdown save.
-	UsageStatisticsPersistIntervalSeconds int `yaml:"usage-statistics-persist-interval-seconds" json:"usage-statistics-persist-interval-seconds"`
-
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
 
@@ -618,7 +613,6 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.LogsMaxTotalSizeMB = 0
 	cfg.ErrorLogsMaxFiles = 10
 	cfg.UsageStatisticsEnabled = false
-	cfg.UsageStatisticsPersistIntervalSeconds = 30
 	cfg.DisableCooling = false
 	cfg.DisableImageGeneration = DisableImageGenerationOff
 	cfg.Pprof.Enable = false
@@ -679,9 +673,6 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	if cfg.ErrorLogsMaxFiles < 0 {
 		cfg.ErrorLogsMaxFiles = 10
-	}
-	if cfg.UsageStatisticsPersistIntervalSeconds < 0 {
-		cfg.UsageStatisticsPersistIntervalSeconds = 0
 	}
 
 	if cfg.MaxRetryCredentials < 0 {

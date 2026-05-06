@@ -139,11 +139,6 @@ func (s *FileTokenStore) List(ctx context.Context) ([]*cliproxyauth.Auth, error)
 		if !strings.HasSuffix(strings.ToLower(d.Name()), ".json") {
 			return nil
 		}
-		// Skip non-auth JSON files (e.g. usage-statistics snapshot)
-		if strings.EqualFold(d.Name(), "usage-statistics.snapshot") ||
-			strings.HasSuffix(strings.ToLower(d.Name()), ".snapshot.json") {
-			return nil
-		}
 		auth, err := s.readAuthFile(path, dir)
 		if err != nil {
 			return nil

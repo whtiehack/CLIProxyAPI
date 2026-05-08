@@ -709,14 +709,15 @@ func appendCodexReasoningItemsFromDetails(out []byte, details []gjson.Result) []
 		if g.encrypted != "" {
 			r, _ = sjson.SetBytes(r, "encrypted_content", g.encrypted)
 		}
-		if len(g.summaries) > 0 {
-			r, _ = sjson.SetRawBytes(r, "summary", []byte(`[]`))
-			for _, s := range g.summaries {
-				si := []byte(`{}`)
-				si, _ = sjson.SetBytes(si, "type", "summary_text")
-				si, _ = sjson.SetBytes(si, "text", s)
-				r, _ = sjson.SetRawBytes(r, "summary.-1", si)
-			}
+		// Codex Responses upstream rejects reasoning items that omit `summary`
+		// with `Missing required parameter: 'input[N].summary'`, so always emit
+		// the field — empty array when no summary_text was preserved.
+		r, _ = sjson.SetRawBytes(r, "summary", []byte(`[]`))
+		for _, s := range g.summaries {
+			si := []byte(`{}`)
+			si, _ = sjson.SetBytes(si, "type", "summary_text")
+			si, _ = sjson.SetBytes(si, "text", s)
+			r, _ = sjson.SetRawBytes(r, "summary.-1", si)
 		}
 		out, _ = sjson.SetRawBytes(out, "input.-1", r)
 	}

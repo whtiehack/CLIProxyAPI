@@ -913,6 +913,49 @@ func TestReasoningDetailsIgnoredOnUserMessage(t *testing.T) {
 	}
 }
 
+// Codex Responses upstream rejects reasoning items lacking the `summary` field
+// (`Missing required parameter: 'input[N].summary'`). Even when only an
+// encrypted token is preserved, the translator must still emit summary as an
+// empty array.
+func TestReasoningDetailsEncryptedOnlyEmitsEmptySummary(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-5.5",
+		"messages": [
+			{"role":"user","content":"hi"},
+			{
+				"role":"assistant",
+				"content":"answer",
+				"reasoning_details":[
+					{"type":"reasoning.encrypted","data":"ENC_ONLY","format":"openai-responses-v1","id":"rs_1","index":0}
+				]
+			}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-5.5", input, true)
+	items := gjson.Get(string(out), "input").Array()
+	if len(items) != 3 {
+		t.Fatalf("expected 3 input items (user + reasoning + assistant), got %d: %s", len(items), gjson.Get(string(out), "input").Raw)
+	}
+	r := items[1]
+	if r.Get("type").String() != "reasoning" {
+		t.Fatalf("item 1: expected reasoning, got %s", r.Raw)
+	}
+	if r.Get("encrypted_content").String() != "ENC_ONLY" {
+		t.Errorf("item 1: encrypted_content mismatch: %s", r.Raw)
+	}
+	summary := r.Get("summary")
+	if !summary.Exists() {
+		t.Errorf("item 1: summary field missing — codex upstream requires it: %s", r.Raw)
+	}
+	if !summary.IsArray() {
+		t.Errorf("item 1: summary must be an array, got %s", r.Raw)
+	}
+	if len(summary.Array()) != 0 {
+		t.Errorf("item 1: summary should be empty, got %s", summary.Raw)
+	}
+}
+
 // Empty/missing data fields skip the corresponding detail without panicking,
 // and a group with neither encrypted_content nor summaries does not emit.
 func TestReasoningDetailsSkipEmptyFields(t *testing.T) {

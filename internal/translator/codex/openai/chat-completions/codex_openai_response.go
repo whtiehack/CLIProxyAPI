@@ -240,6 +240,18 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 			return [][]byte{}
 		}
 		itemType := itemResult.Get("type").String()
+		if itemType == "reasoning" {
+			details := buildReasoningDetailsFromCodexItem(itemResult)
+			if len(details) == 0 {
+				return [][]byte{}
+			}
+			template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
+			template, _ = sjson.SetRawBytes(template, "choices.0.delta.reasoning_details", []byte(`[]`))
+			for _, d := range details {
+				template, _ = sjson.SetRawBytes(template, "choices.0.delta.reasoning_details.-1", d)
+			}
+			return [][]byte{template}
+		}
 		if itemType == "image_generation_call" {
 			itemID := itemResult.Get("id").String()
 			b64 := itemResult.Get("result").String()
@@ -381,6 +393,7 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 
 	// Process the output array for content and function calls
 	var toolCalls [][]byte
+	var reasoningDetails [][]byte
 	var images [][]byte
 	outputResult := responseResult.Get("output")
 	if outputResult.IsArray() {
@@ -393,7 +406,13 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 
 			switch outputType {
 			case "reasoning":
-				// Extract reasoning content from summary
+				// Build OpenRouter-style reasoning_details (encrypted + summaries)
+				// for stateless multi-turn reasoning preservation, while keeping the
+				// legacy `reasoning_content` field populated with the accumulated
+				// summary text for backward compatibility with existing chat clients.
+				for _, d := range buildReasoningDetailsFromCodexItem(outputItem) {
+					reasoningDetails = append(reasoningDetails, d)
+				}
 				if summaryResult := outputItem.Get("summary"); summaryResult.IsArray() {
 					summaryArray := summaryResult.Array()
 					for _, summaryItem := range summaryArray {
@@ -463,6 +482,14 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 
 		if reasoningText != "" {
 			template, _ = sjson.SetBytes(template, "choices.0.message.reasoning_content", reasoningText)
+		}
+
+		if len(reasoningDetails) > 0 {
+			template, _ = sjson.SetRawBytes(template, "choices.0.message.reasoning_details", []byte(`[]`))
+			for _, d := range reasoningDetails {
+				template, _ = sjson.SetRawBytes(template, "choices.0.message.reasoning_details.-1", d)
+			}
+			template, _ = sjson.SetBytes(template, "choices.0.message.role", "assistant")
 		}
 
 		// Add tool calls if any
@@ -544,6 +571,64 @@ func buildReverseMapFromOriginalOpenAI(original []byte) map[string]string {
 		}
 	}
 	return rev
+}
+
+// buildReasoningDetailsFromCodexItem turns a single Codex `output[type=reasoning]`
+// item into one or more OpenRouter-style reasoning_details entries.
+//
+// Output schema (OpenRouter chat completions reasoning_details):
+//   - reasoning.encrypted: {type, data, id?, format, index}
+//   - reasoning.summary:   {type, summary, id?, format, index}
+//
+// Order within the returned slice mirrors Codex's intent: encrypted token
+// (if present) first, then each summary_text in source order. Index is local
+// to this single Codex item and starts at 0; callers concatenating multiple
+// reasoning items across a response are responsible for their own ordering.
+func buildReasoningDetailsFromCodexItem(item gjson.Result) [][]byte {
+	if !item.Exists() {
+		return nil
+	}
+	id := item.Get("id").String()
+	encrypted := item.Get("encrypted_content").String()
+	const fmtTag = "openai-responses-v1"
+
+	var out [][]byte
+	idx := 0
+	if encrypted != "" {
+		d := []byte(`{}`)
+		d, _ = sjson.SetBytes(d, "type", "reasoning.encrypted")
+		d, _ = sjson.SetBytes(d, "data", encrypted)
+		d, _ = sjson.SetBytes(d, "format", fmtTag)
+		if id != "" {
+			d, _ = sjson.SetBytes(d, "id", id)
+		}
+		d, _ = sjson.SetBytes(d, "index", idx)
+		out = append(out, d)
+		idx++
+	}
+
+	if summaryResult := item.Get("summary"); summaryResult.IsArray() {
+		for _, summaryItem := range summaryResult.Array() {
+			if summaryItem.Get("type").String() != "summary_text" {
+				continue
+			}
+			text := summaryItem.Get("text").String()
+			if text == "" {
+				continue
+			}
+			d := []byte(`{}`)
+			d, _ = sjson.SetBytes(d, "type", "reasoning.summary")
+			d, _ = sjson.SetBytes(d, "summary", text)
+			d, _ = sjson.SetBytes(d, "format", fmtTag)
+			if id != "" {
+				d, _ = sjson.SetBytes(d, "id", id)
+			}
+			d, _ = sjson.SetBytes(d, "index", idx)
+			out = append(out, d)
+			idx++
+		}
+	}
+	return out
 }
 
 func mimeTypeFromCodexOutputFormat(outputFormat string) string {

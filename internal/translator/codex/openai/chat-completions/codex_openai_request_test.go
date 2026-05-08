@@ -1109,3 +1109,139 @@ func TestToolsDefinitionTranslated(t *testing.T) {
 		t.Errorf("tool 'search' not found in output tools: %s", gjson.Get(result, "tools").Raw)
 	}
 }
+
+// reasoning_details detail items sharing an id collapse into a single Codex
+// reasoning input item with both encrypted_content and summary_text populated.
+// The reasoning item must precede the assistant message in input order.
+func TestReasoningDetailsCollapseByIDAndPrecedeAssistantMessage(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-5.5",
+		"messages": [
+			{"role": "user", "content": "hi"},
+			{
+				"role": "assistant",
+				"content": "answer",
+				"reasoning_details": [
+					{"type":"reasoning.encrypted","data":"ENC_TOKEN","format":"openai-responses-v1","id":"rs_1","index":0},
+					{"type":"reasoning.summary","summary":"thought one","format":"openai-responses-v1","id":"rs_1","index":1}
+				]
+			},
+			{"role": "user", "content": "follow-up"}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-5.5", input, true)
+	result := string(out)
+
+	items := gjson.Get(result, "input").Array()
+	// expected order: user → reasoning(rs_1) → assistant message → user
+	if len(items) != 4 {
+		t.Fatalf("expected 4 input items, got %d: %s", len(items), gjson.Get(result, "input").Raw)
+	}
+	if items[1].Get("type").String() != "reasoning" {
+		t.Errorf("item 1: expected type reasoning, got %q (full: %s)", items[1].Get("type").String(), items[1].Raw)
+	}
+	if items[1].Get("id").String() != "rs_1" {
+		t.Errorf("item 1: expected id rs_1, got %q", items[1].Get("id").String())
+	}
+	if items[1].Get("encrypted_content").String() != "ENC_TOKEN" {
+		t.Errorf("item 1: expected encrypted_content ENC_TOKEN, got %q", items[1].Get("encrypted_content").String())
+	}
+	summaries := items[1].Get("summary").Array()
+	if len(summaries) != 1 || summaries[0].Get("text").String() != "thought one" {
+		t.Errorf("item 1: expected single summary 'thought one', got %s", items[1].Get("summary").Raw)
+	}
+	if items[2].Get("type").String() != "message" || items[2].Get("role").String() != "assistant" {
+		t.Errorf("item 2: expected assistant message, got %s", items[2].Raw)
+	}
+}
+
+// Multiple reasoning_details items with distinct ids each become their own
+// Codex reasoning input item, in source order.
+func TestReasoningDetailsMultipleIDsKeepSourceOrder(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-5.5",
+		"messages": [
+			{"role": "user", "content": "hi"},
+			{
+				"role": "assistant",
+				"content": "answer",
+				"reasoning_details": [
+					{"type":"reasoning.encrypted","data":"ENC_A","format":"openai-responses-v1","id":"rs_a","index":0},
+					{"type":"reasoning.encrypted","data":"ENC_B","format":"openai-responses-v1","id":"rs_b","index":1}
+				]
+			}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-5.5", input, true)
+	items := gjson.Get(string(out), "input").Array()
+	if len(items) != 4 {
+		t.Fatalf("expected 4 input items (user + 2 reasoning + assistant message), got %d: %s", len(items), gjson.Get(string(out), "input").Raw)
+	}
+	if items[1].Get("type").String() != "reasoning" || items[1].Get("id").String() != "rs_a" {
+		t.Errorf("item 1: expected reasoning rs_a, got %s", items[1].Raw)
+	}
+	if items[2].Get("type").String() != "reasoning" || items[2].Get("id").String() != "rs_b" {
+		t.Errorf("item 2: expected reasoning rs_b, got %s", items[2].Raw)
+	}
+}
+
+// reasoning_details on non-assistant messages are ignored (only assistant
+// messages can carry reasoning per OpenRouter spec).
+func TestReasoningDetailsIgnoredOnUserMessage(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-5.5",
+		"messages": [
+			{
+				"role": "user",
+				"content": "hi",
+				"reasoning_details": [
+					{"type":"reasoning.encrypted","data":"SHOULD_BE_IGNORED","format":"openai-responses-v1","id":"rs_x"}
+				]
+			}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-5.5", input, true)
+	items := gjson.Get(string(out), "input").Array()
+	if len(items) != 1 {
+		t.Fatalf("expected only the user message, got %d items: %s", len(items), gjson.Get(string(out), "input").Raw)
+	}
+	if items[0].Get("type").String() == "reasoning" {
+		t.Errorf("user-message reasoning_details should not become a reasoning input item")
+	}
+}
+
+// Empty/missing data fields skip the corresponding detail without panicking,
+// and a group with neither encrypted_content nor summaries does not emit.
+func TestReasoningDetailsSkipEmptyFields(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-5.5",
+		"messages": [
+			{"role":"user","content":"hi"},
+			{
+				"role":"assistant",
+				"content":"answer",
+				"reasoning_details":[
+					{"type":"reasoning.encrypted","data":"","id":"rs_empty"},
+					{"type":"reasoning.summary","summary":"","id":"rs_empty"},
+					{"type":"reasoning.text","text":"plaintext","id":"rs_text"}
+				]
+			}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-5.5", input, true)
+	items := gjson.Get(string(out), "input").Array()
+	// rs_empty drops (no usable fields), rs_text type is unsupported in this
+	// translator and skipped, leaving only [user, assistant message].
+	if len(items) != 2 {
+		t.Fatalf("expected 2 input items (no reasoning emitted), got %d: %s", len(items), gjson.Get(string(out), "input").Raw)
+	}
+	for _, it := range items {
+		if it.Get("type").String() == "reasoning" {
+			t.Errorf("unexpected reasoning item emitted: %s", it.Raw)
+		}
+	}
+}

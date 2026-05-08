@@ -251,6 +251,17 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 					}
 				}
 
+				// OpenRouter chat completions reasoning_details (assistant only).
+				// Reasoning items must precede the message they belong to in the
+				// Codex Responses input array, otherwise the upstream rejects the
+				// continuation with `Item ... not found`. Emit them before the
+				// message item below.
+				if role == "assistant" {
+					if rd := m.Get("reasoning_details"); rd.Exists() && rd.IsArray() {
+						out = appendCodexReasoningItemsFromDetails(out, rd.Array())
+					}
+				}
+
 				// Don't emit empty assistant messages when only tool_calls
 				// are present — Responses API needs function_call items
 				// directly, otherwise call_id matching fails (#2132).
@@ -628,4 +639,86 @@ func buildShortNameMap(names []string) map[string]string {
 		m[n] = uniq
 	}
 	return m
+}
+
+// appendCodexReasoningItemsFromDetails materializes the OpenRouter chat
+// completions `messages[].reasoning_details` array as Codex Responses input
+// `type:"reasoning"` items and appends them to the running `input` array.
+//
+// Detail items sharing the same `id` collapse into a single Codex reasoning
+// item so encrypted_content + summary_text live together (the shape Codex
+// upstream emits and the only shape the cache continuation accepts). Detail
+// items without an id each become their own Codex reasoning item to preserve
+// ordering. `reasoning.text` (Anthropic-only variant) is intentionally skipped
+// because Codex has no equivalent field; round-tripping it elsewhere is the
+// caller's responsibility.
+func appendCodexReasoningItemsFromDetails(out []byte, details []gjson.Result) []byte {
+	type group struct {
+		id        string
+		encrypted string
+		summaries []string
+	}
+	var groups []group
+	indexByID := map[string]int{}
+
+	indexOfGroup := func(id string) int {
+		if id == "" {
+			groups = append(groups, group{})
+			return len(groups) - 1
+		}
+		if i, ok := indexByID[id]; ok {
+			return i
+		}
+		groups = append(groups, group{id: id})
+		indexByID[id] = len(groups) - 1
+		return len(groups) - 1
+	}
+
+	for _, d := range details {
+		dt := d.Get("type").String()
+		id := d.Get("id").String()
+		switch dt {
+		case "reasoning.encrypted":
+			data := d.Get("data").String()
+			if data == "" {
+				continue
+			}
+			i := indexOfGroup(id)
+			if groups[i].encrypted == "" {
+				groups[i].encrypted = data
+			}
+		case "reasoning.summary":
+			s := d.Get("summary").String()
+			if s == "" {
+				continue
+			}
+			i := indexOfGroup(id)
+			groups[i].summaries = append(groups[i].summaries, s)
+		}
+	}
+
+	for _, g := range groups {
+		if g.encrypted == "" && len(g.summaries) == 0 {
+			continue
+		}
+		r := []byte(`{}`)
+		r, _ = sjson.SetBytes(r, "type", "reasoning")
+		if g.id != "" {
+			r, _ = sjson.SetBytes(r, "id", g.id)
+		}
+		if g.encrypted != "" {
+			r, _ = sjson.SetBytes(r, "encrypted_content", g.encrypted)
+		}
+		if len(g.summaries) > 0 {
+			r, _ = sjson.SetRawBytes(r, "summary", []byte(`[]`))
+			for _, s := range g.summaries {
+				si := []byte(`{}`)
+				si, _ = sjson.SetBytes(si, "type", "summary_text")
+				si, _ = sjson.SetBytes(si, "text", s)
+				r, _ = sjson.SetRawBytes(r, "summary.-1", si)
+			}
+		}
+		out, _ = sjson.SetRawBytes(out, "input.-1", r)
+	}
+	return out
 }

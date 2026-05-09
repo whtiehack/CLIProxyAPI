@@ -68,4 +68,14 @@ type StreamingConfig struct {
 	// is closed. This prevents requests from hanging indefinitely when upstream stops responding
 	// mid-stream. <= 0 disables idle timeout. Default is 0 (disabled).
 	StreamIdleTimeoutSeconds int `yaml:"stream-idle-timeout-seconds,omitempty" json:"stream-idle-timeout-seconds,omitempty"`
+
+	// GatewayErrorRetry controls whether per-request retry skips upstreams that just returned a
+	// gateway-style HTTP error (408/502/503/504/522/524). Pointer semantics: nil = default ON,
+	// *false = disabled. OAuth-backed auths are unaffected (never skipped, never cooled down).
+	GatewayErrorRetry *bool `yaml:"gateway-error-retry,omitempty" json:"gateway-error-retry,omitempty"`
+
+	// GatewayErrorCooldownSec sets the duration (in seconds) for which an api-key upstream
+	// (identified by base-url) is paused after a gateway-style error, so subsequent requests
+	// avoid the dead upstream. 0 = use default 300s, < 0 = disabled. OAuth auths never enter cooldown.
+	GatewayErrorCooldownSec int `yaml:"gateway-error-cooldown-sec,omitempty" json:"gateway-error-cooldown-sec,omitempty"`
 }

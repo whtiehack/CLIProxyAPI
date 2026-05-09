@@ -179,6 +179,11 @@ type Manager struct {
 	// Auto refresh state
 	refreshCancel context.CancelFunc
 	refreshLoop   *authAutoRefreshLoop
+
+	// gatewayCooldown tracks per-upstream pause-until timestamps for api-key auths
+	// that recently returned a gateway-style error (e.g. CF 522). Keyed by upstream
+	// skip key (see upstreamSkipKey). OAuth-backed auths are never recorded here.
+	gatewayCooldown sync.Map
 }
 
 // NewManager constructs a manager with optional custom selector and hook.
@@ -1567,6 +1572,10 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	tried := make(map[string]struct{})
 	attempted := make(map[string]struct{})
+	gatewaySkipped := make(map[string]struct{})
+	cfgSnapshot, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	gatewayRetry := gatewayErrorRetryEnabled(cfgSnapshot)
+	gatewayCooldown := gatewayErrorCooldownDuration(cfgSnapshot)
 	var lastErr error
 	var requestInvalidErr error
 	invalidRetryAttempts := 0
@@ -1592,6 +1601,20 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				return nil, lastErr
 			}
 			return nil, errPick
+		}
+		if gatewayRetry && !isOAuthAuth(auth) {
+			skipKey := upstreamSkipKey(auth)
+			if skipKey != "" {
+				if _, alreadySkipped := gatewaySkipped[skipKey]; alreadySkipped {
+					tried[auth.ID] = struct{}{}
+					continue
+				}
+				if pausedUntil := m.gatewayPauseUntil(skipKey); !pausedUntil.IsZero() {
+					logEntryWithRequestID(ctx).WithField("auth_id", auth.ID).WithField("upstream", skipKey).Infof("[gateway_skip] upstream in cooldown until %s, picking another", pausedUntil.Format(time.RFC3339))
+					tried[auth.ID] = struct{}{}
+					continue
+				}
+			}
 		}
 		if requestInvalidErr != nil {
 			invalidRetryAttempts++
@@ -1623,6 +1646,17 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 					return nil, errStream
 				}
 				continue
+			}
+			if gatewayRetry && isUpstreamGatewayError(errStream) && !isOAuthAuth(auth) {
+				skipKey := upstreamSkipKey(auth)
+				if skipKey != "" {
+					gatewaySkipped[skipKey] = struct{}{}
+					logEntryWithRequestID(ctx).WithField("auth_id", auth.ID).WithField("upstream", skipKey).WithField("status", statusCodeFromError(errStream)).Warnf("[gateway_skip] upstream gateway error, skipping for this request")
+					if gatewayCooldown > 0 && strings.HasPrefix(skipKey, "apikey:") {
+						m.markGatewayCooldown(skipKey, gatewayCooldown)
+						logEntryWithRequestID(ctx).WithField("upstream", skipKey).Warnf("[gateway_cooldown] paused upstream for %s", gatewayCooldown)
+					}
+				}
 			}
 			lastErr = errStream
 			continue
@@ -2633,6 +2667,118 @@ func isRequestScopedNotFoundResultError(err *Error) bool {
 		return false
 	}
 	return isRequestScopedNotFoundMessage(err.Message)
+}
+
+// isUpstreamGatewayError returns true if the error represents a gateway-style
+// HTTP failure where the upstream itself is unreachable or unresponsive (CF 522,
+// 504, 503, 502, 524, 408). These signal "this specific upstream host is bad",
+// distinct from request-shape errors (handled by isRequestInvalidError).
+func isUpstreamGatewayError(err error) bool {
+	if err == nil {
+		return false
+	}
+	switch statusCodeFromError(err) {
+	case http.StatusRequestTimeout,
+		http.StatusBadGateway,
+		http.StatusServiceUnavailable,
+		http.StatusGatewayTimeout,
+		522, // Cloudflare: connection timed out
+		524: // Cloudflare: a timeout occurred
+		return true
+	}
+	return false
+}
+
+// isOAuthAuth reports whether the auth is OAuth-backed (codex/claude/gemini login)
+// rather than a plain api-key. OAuth auths are addressed by a hardcoded shared
+// upstream endpoint, so they are excluded from upstream-cooldown tracking.
+func isOAuthAuth(auth *Auth) bool {
+	if auth == nil || auth.Metadata == nil {
+		return false
+	}
+	if v, ok := auth.Metadata["access_token"].(string); ok && strings.TrimSpace(v) != "" {
+		return true
+	}
+	return false
+}
+
+// upstreamSkipKey returns a stable identifier for the upstream endpoint used by
+// auth, suitable for per-request gateway-error skip-sets and cross-request
+// cooldown bookkeeping. OAuth and api-key auths live in disjoint namespaces so
+// the two categories never collide.
+func upstreamSkipKey(auth *Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if isOAuthAuth(auth) {
+		return "oauth:" + strings.TrimSpace(strings.ToLower(auth.Provider))
+	}
+	if auth.Attributes != nil {
+		if u := strings.TrimSpace(auth.Attributes["base_url"]); u != "" {
+			return "apikey:" + u
+		}
+	}
+	return "auth:" + auth.ID
+}
+
+// gatewayPauseUntil returns the timestamp until which the given upstream skip key
+// is paused due to recent gateway errors. Zero time means not paused. Expired
+// entries are eagerly cleared.
+func (m *Manager) gatewayPauseUntil(key string) time.Time {
+	if m == nil || key == "" {
+		return time.Time{}
+	}
+	raw, ok := m.gatewayCooldown.Load(key)
+	if !ok {
+		return time.Time{}
+	}
+	until, ok := raw.(time.Time)
+	if !ok || until.IsZero() {
+		return time.Time{}
+	}
+	if time.Now().After(until) {
+		m.gatewayCooldown.Delete(key)
+		return time.Time{}
+	}
+	return until
+}
+
+// markGatewayCooldown pauses the given upstream skip key for the supplied duration.
+// A non-positive duration clears any existing pause. Callers must skip OAuth auths.
+func (m *Manager) markGatewayCooldown(key string, dur time.Duration) {
+	if m == nil || key == "" {
+		return
+	}
+	if dur <= 0 {
+		m.gatewayCooldown.Delete(key)
+		return
+	}
+	m.gatewayCooldown.Store(key, time.Now().Add(dur))
+}
+
+// gatewayErrorRetryEnabled reports whether per-request gateway-error skip is on.
+// Default ON when the field is unset.
+func gatewayErrorRetryEnabled(cfg *internalconfig.Config) bool {
+	if cfg == nil || cfg.Streaming.GatewayErrorRetry == nil {
+		return true
+	}
+	return *cfg.Streaming.GatewayErrorRetry
+}
+
+// gatewayErrorCooldownDuration returns the cooldown window applied to api-key
+// upstreams after a gateway error. 0 = use default 300s, <0 = disabled.
+func gatewayErrorCooldownDuration(cfg *internalconfig.Config) time.Duration {
+	if cfg == nil {
+		return 300 * time.Second
+	}
+	v := cfg.Streaming.GatewayErrorCooldownSec
+	if v < 0 {
+		return 0
+	}
+	if v == 0 {
+		return 300 * time.Second
+	}
+	return time.Duration(v) * time.Second
 }
 
 // isRequestInvalidError returns true if the error represents a client request

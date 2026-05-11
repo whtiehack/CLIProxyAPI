@@ -1594,6 +1594,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
 		if errPick != nil {
+			if releasePinnedAuthIfTried(opts.Metadata, tried) {
+				continue
+			}
 			if requestInvalidErr != nil {
 				return nil, requestInvalidErr
 			}

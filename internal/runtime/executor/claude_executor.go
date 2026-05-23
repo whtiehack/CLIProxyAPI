@@ -568,6 +568,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	})
 
 	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
+	if e.cfg != nil && e.cfg.Streaming.StallTimeoutSeconds > 0 {
+		helps.ApplyResponseHeaderTimeout(httpClient, time.Duration(e.cfg.Streaming.StallTimeoutSeconds)*time.Second)
+	}
 	httpClient = reporter.TrackHTTPClient(httpClient)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
@@ -618,6 +621,17 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			}
 		}()
 
+		var idleTimer *time.Timer
+		var idleDur time.Duration
+		if e.cfg != nil && e.cfg.Streaming.StreamIdleTimeoutSeconds > 0 {
+			idleDur = time.Duration(e.cfg.Streaming.StreamIdleTimeoutSeconds) * time.Second
+			idleTimer = time.AfterFunc(idleDur, func() {
+				log.Warnf("[stream_idle_timeout] claude: closing upstream connection after %v idle", idleDur)
+				_ = httpResp.Body.Close()
+			})
+			defer idleTimer.Stop()
+		}
+
 		// If the response target is Claude, directly forward complete SSE events without translation.
 		if responseFormat == to {
 			scanner := bufio.NewScanner(decodedBody)
@@ -637,6 +651,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				}
 			}
 			for scanner.Scan() {
+				if idleTimer != nil {
+					idleTimer.Reset(idleDur)
+				}
 				line := scanner.Bytes()
 				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 				if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
@@ -669,6 +686,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
 		for scanner.Scan() {
+			if idleTimer != nil {
+				idleTimer.Reset(idleDur)
+			}
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {

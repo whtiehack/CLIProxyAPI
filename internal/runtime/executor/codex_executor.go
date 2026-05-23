@@ -1452,6 +1452,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	})
 
 	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
+	if e.cfg != nil && e.cfg.Streaming.StallTimeoutSeconds > 0 {
+		helps.ApplyResponseHeaderTimeout(httpClient, time.Duration(e.cfg.Streaming.StallTimeoutSeconds)*time.Second)
+	}
 	httpClient = reporter.TrackHTTPClient(httpClient)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
@@ -1485,6 +1488,16 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				log.Errorf("codex executor: close response body error: %v", errClose)
 			}
 		}()
+		var idleTimer *time.Timer
+		var idleDur time.Duration
+		if e.cfg != nil && e.cfg.Streaming.StreamIdleTimeoutSeconds > 0 {
+			idleDur = time.Duration(e.cfg.Streaming.StreamIdleTimeoutSeconds) * time.Second
+			idleTimer = time.AfterFunc(idleDur, func() {
+				log.Warnf("[stream_idle_timeout] codex: closing upstream connection after %v idle", idleDur)
+				_ = httpResp.Body.Close()
+			})
+			defer idleTimer.Stop()
+		}
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, 52_428_800) // 50MB
 		claudeInputTokens := helps.NewClaudeInputTokenState(from, to, responseFormat, originalPayload)
@@ -1492,6 +1505,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
 		for scanner.Scan() {
+			if idleTimer != nil {
+				idleTimer.Reset(idleDur)
+			}
 			line := applyCodexIdentityConfuseResponsePayload(scanner.Bytes(), identityState)
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			translatedLine := bytes.Clone(line)

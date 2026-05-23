@@ -2,6 +2,8 @@ package helps
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -59,6 +61,82 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	}
 
 	return httpClient
+}
+
+// ApplyResponseHeaderTimeout sets ResponseHeaderTimeout on the client's transport so
+// httpClient.Do returns a net.Error timeout if upstream does not return response headers
+// within the given duration. Only affects waiting for response headers; body reads are unaffected.
+// Used together with StallTimeoutSeconds to catch upstreams that accept the connection
+// but never produce a response.
+func ApplyResponseHeaderTimeout(client *http.Client, timeout time.Duration) {
+	if client == nil || timeout <= 0 {
+		return
+	}
+	switch t := client.Transport.(type) {
+	case *http.Transport:
+		cloned := t.Clone()
+		cloned.ResponseHeaderTimeout = timeout
+		client.Transport = cloned
+	case nil:
+		cloned := http.DefaultTransport.(*http.Transport).Clone()
+		cloned.ResponseHeaderTimeout = timeout
+		client.Transport = cloned
+	default:
+		// Custom RoundTripper (e.g. the utls fallback transport): wrap it with a
+		// context-based response-header timeout so the guard still applies.
+		client.Transport = &responseHeaderTimeoutTransport{rt: t, timeout: timeout}
+	}
+}
+
+// errResponseHeaderTimeout is returned when upstream does not deliver response
+// headers within the configured window. It implements net.Error with
+// Timeout() == true so the conductor classifies it as a stream stall, matching
+// the semantics of http.Transport.ResponseHeaderTimeout.
+var errResponseHeaderTimeout error = headerTimeoutError{}
+
+type headerTimeoutError struct{}
+
+func (headerTimeoutError) Error() string   { return "timeout awaiting response headers" }
+func (headerTimeoutError) Timeout() bool   { return true }
+func (headerTimeoutError) Temporary() bool { return true }
+
+// responseHeaderTimeoutTransport enforces a response-header timeout for
+// transports that are not *http.Transport. It cancels the request context if
+// headers do not arrive in time; once headers are received the derived context
+// stays alive until the response body is closed.
+type responseHeaderTimeoutTransport struct {
+	rt      http.RoundTripper
+	timeout time.Duration
+}
+
+func (t *responseHeaderTimeoutTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	ctx, cancel := context.WithCancelCause(req.Context())
+	timer := time.AfterFunc(t.timeout, func() { cancel(errResponseHeaderTimeout) })
+	resp, err := t.rt.RoundTrip(req.WithContext(ctx))
+	timer.Stop()
+	if err != nil {
+		isHeaderTimeout := errors.Is(context.Cause(ctx), errResponseHeaderTimeout)
+		cancel(nil)
+		if isHeaderTimeout {
+			return nil, errResponseHeaderTimeout
+		}
+		return nil, err
+	}
+	// Cancelling the derived context now would abort body reads, so defer it
+	// to body close.
+	resp.Body = &cancelOnCloseBody{ReadCloser: resp.Body, cancel: func() { cancel(nil) }}
+	return resp, nil
+}
+
+type cancelOnCloseBody struct {
+	io.ReadCloser
+	cancel func()
+}
+
+func (b *cancelOnCloseBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.cancel()
+	return err
 }
 
 // buildProxyTransport creates an HTTP transport configured for the given proxy URL.

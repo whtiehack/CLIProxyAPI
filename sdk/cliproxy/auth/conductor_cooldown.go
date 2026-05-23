@@ -786,6 +786,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							suspendReason = "invalid_grant"
 							shouldSuspendModel = true
 						}
+					} else if result.Error != nil && result.Error.Code == "stream_stall" {
+						next := now.Add(30 * time.Minute)
+						state.NextRetryAfter = next
+						suspendReason = "stream_stall"
+						shouldSuspendModel = true
 					} else {
 						switch statusCode {
 						case 401:

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
@@ -216,6 +217,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	})
 
 	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
+	if e.cfg != nil && e.cfg.Streaming.StallTimeoutSeconds > 0 {
+		helps.ApplyResponseHeaderTimeout(httpClient, time.Duration(e.cfg.Streaming.StallTimeoutSeconds)*time.Second)
+	}
 	httpClient = reporter.TrackHTTPClient(httpClient)
 	httpResp, err := doClaudeUpstreamRequest(httpClient, httpReq)
 	if err != nil {
@@ -294,6 +298,17 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			}
 		}
 
+		var idleTimer *time.Timer
+		var idleDur time.Duration
+		if e.cfg != nil && e.cfg.Streaming.StreamIdleTimeoutSeconds > 0 {
+			idleDur = time.Duration(e.cfg.Streaming.StreamIdleTimeoutSeconds) * time.Second
+			idleTimer = time.AfterFunc(idleDur, func() {
+				log.Warnf("[stream_idle_timeout] claude: closing upstream connection after %v idle", idleDur)
+				_ = httpResp.Body.Close()
+			})
+			defer idleTimer.Stop()
+		}
+
 		// If the response target is Claude, directly forward complete SSE events without translation.
 		if responseFormat == to {
 			scanner := bufio.NewScanner(decodedBody)
@@ -315,6 +330,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				}
 			}
 			for scanner.Scan() {
+				if idleTimer != nil {
+					idleTimer.Reset(idleDur)
+				}
 				line := scanner.Bytes()
 				observeClaudeStreamLine(line, &upstreamMessageID, &upstreamCompleted)
 				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
@@ -364,6 +382,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		var upstreamMessageID string
 		upstreamCompleted := false
 		for scanner.Scan() {
+			if idleTimer != nil {
+				idleTimer.Reset(idleDur)
+			}
 			line := scanner.Bytes()
 			observeClaudeStreamLine(line, &upstreamMessageID, &upstreamCompleted)
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)

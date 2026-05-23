@@ -2,10 +2,15 @@ package auth
 
 import (
 	"context"
+	"errors"
+	"net"
 	"net/http"
 	"strings"
+	"time"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	log "github.com/sirupsen/logrus"
 )
 
 func discardStreamChunks(ch <-chan cliproxyexecutor.StreamChunk) {
@@ -81,11 +86,36 @@ func validateStreamResult(result *cliproxyexecutor.StreamResult, err error) (*cl
 	return result, nil
 }
 
-func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamChunk) ([]cliproxyexecutor.StreamChunk, bool, error) {
+// errStreamStall is a sentinel error returned when the upstream stream produces no payload
+// within the configured stall-timeout-seconds window, or when the upstream HTTP transport
+// returns a ResponseHeaderTimeout. It carries 502 to keep retry semantics consistent.
+var errStreamStall = &Error{
+	Code:       "stream_stall",
+	Message:    "upstream stream stalled: no payload received within timeout",
+	HTTPStatus: 502,
+}
+
+// isNetworkTimeout reports whether err is a network-level timeout (e.g.
+// ResponseHeaderTimeout). Context cancellations are NOT network timeouts;
+// callers should check ctx.Err() before calling this.
+func isNetworkTimeout(err error) bool {
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamChunk, stallTimeout time.Duration) ([]cliproxyexecutor.StreamChunk, bool, error) {
 	if ch == nil {
 		return nil, true, nil
 	}
 	buffered := make([]cliproxyexecutor.StreamChunk, 0, 1)
+
+	var stallCh <-chan time.Time
+	if stallTimeout > 0 {
+		stallTimer := time.NewTimer(stallTimeout)
+		stallCh = stallTimer.C
+		defer stallTimer.Stop()
+	}
+
 	for {
 		var (
 			chunk cliproxyexecutor.StreamChunk
@@ -95,10 +125,16 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 			select {
 			case <-ctx.Done():
 				return nil, false, ctx.Err()
+			case <-stallCh:
+				return nil, false, errStreamStall
 			case chunk, ok = <-ch:
 			}
 		} else {
-			chunk, ok = <-ch
+			select {
+			case <-stallCh:
+				return nil, false, errStreamStall
+			case chunk, ok = <-ch:
+			}
 		}
 		if !ok {
 			return buffered, true, nil
@@ -206,6 +242,14 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		return nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
 	ctx = contextWithRequestedModelAlias(ctx, opts, routeModel)
+
+	// Resolve stall timeout from runtime config. Used both as readStreamBootstrap
+	// bootstrap-stall budget and to classify ResponseHeaderTimeout errors as stalls.
+	var stallTimeout time.Duration
+	if cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config); cfg != nil && cfg.Streaming.StallTimeoutSeconds > 0 {
+		stallTimeout = time.Duration(cfg.Streaming.StallTimeoutSeconds) * time.Second
+	}
+
 	var lastErr error
 	didRefreshOnUnauthorized := false
 	if auth != nil && unauthorizedRefreshTried != nil {
@@ -268,6 +312,15 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		}
 		streamResult, errStream = validateStreamResult(streamResult, errStream)
 		if errStream != nil {
+			// Upstream did not return response headers within stall-timeout-seconds:
+			// classify as stream stall so the credential gets the 30-minute suspension.
+			if stallTimeout > 0 && isNetworkTimeout(errStream) {
+				log.Warnf("[stream_stall] auth=%s model=%s: upstream response header timeout, suspending for 30m", auth.ID, resultModel)
+				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: errStreamStall, Options: execOpts}
+				m.recordExecutionResult(ctx, result, auth, ephemeralResult)
+				lastErr = errStreamStall
+				continue
+			}
 			rerr := resultErrorFromError(errStream)
 			action, okAction := matchRequestScopedErrorAction(auth, errStream, m.runtimeConfigSnapshot())
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr, Options: execOpts}
@@ -297,7 +350,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			continue
 		}
 
-		buffered, closed, bootstrapErr := readStreamBootstrap(ctx, streamResult.Chunks)
+		buffered, closed, bootstrapErr := readStreamBootstrap(ctx, streamResult.Chunks, stallTimeout)
 		if bootstrapErr != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
 				discardStreamChunks(streamResult.Chunks)
@@ -333,7 +386,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 						streamResult = &cliproxyexecutor.StreamResult{}
 					} else {
 						streamResult = retryStream
-						buffered, closed, bootstrapErr = readStreamBootstrap(ctx, streamResult.Chunks)
+						buffered, closed, bootstrapErr = readStreamBootstrap(ctx, streamResult.Chunks, stallTimeout)
 					}
 				}
 			}
@@ -345,6 +398,15 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			}
 		}
 		if bootstrapErr != nil {
+			// Bootstrap-stall: upstream returned headers but never sent any SSE payload.
+			if bootstrapErr == errStreamStall {
+				log.Warnf("[stream_stall] auth=%s model=%s: no SSE payload within %v, suspending for 30m", auth.ID, resultModel, stallTimeout)
+				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: errStreamStall, Options: execOpts}
+				m.recordExecutionResult(ctx, result, auth, ephemeralResult)
+				discardStreamChunks(streamResult.Chunks)
+				lastErr = errStreamStall
+				continue
+			}
 			action, okAction := matchRequestScopedErrorAction(auth, bootstrapErr, m.runtimeConfigSnapshot())
 			if okAction {
 				rerr := resultErrorFromError(bootstrapErr)

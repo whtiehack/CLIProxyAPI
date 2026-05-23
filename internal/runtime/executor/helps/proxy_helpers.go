@@ -61,6 +61,29 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	return httpClient
 }
 
+// ApplyResponseHeaderTimeout sets ResponseHeaderTimeout on the client's transport so
+// httpClient.Do returns a net.Error timeout if upstream does not return response headers
+// within the given duration. Only affects waiting for response headers; body reads are unaffected.
+// Used together with StallTimeoutSeconds to catch upstreams that accept the connection
+// but never produce a response.
+func ApplyResponseHeaderTimeout(client *http.Client, timeout time.Duration) {
+	if client == nil || timeout <= 0 {
+		return
+	}
+	switch t := client.Transport.(type) {
+	case *http.Transport:
+		cloned := t.Clone()
+		cloned.ResponseHeaderTimeout = timeout
+		client.Transport = cloned
+	case nil:
+		cloned := http.DefaultTransport.(*http.Transport).Clone()
+		cloned.ResponseHeaderTimeout = timeout
+		client.Transport = cloned
+	default:
+		_ = t // custom RoundTripper; cannot set ResponseHeaderTimeout
+	}
+}
+
 // buildProxyTransport creates an HTTP transport configured for the given proxy URL.
 // It supports SOCKS5, HTTP, and HTTPS proxy protocols.
 //

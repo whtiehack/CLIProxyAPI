@@ -357,6 +357,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	})
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	if e.cfg != nil && e.cfg.Streaming.StallTimeoutSeconds > 0 {
+		helps.ApplyResponseHeaderTimeout(httpClient, time.Duration(e.cfg.Streaming.StallTimeoutSeconds)*time.Second)
+	}
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
@@ -381,10 +384,23 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 				log.Errorf("openai compat executor: close response body error: %v", errClose)
 			}
 		}()
+		var idleTimer *time.Timer
+		var idleDur time.Duration
+		if e.cfg != nil && e.cfg.Streaming.StreamIdleTimeoutSeconds > 0 {
+			idleDur = time.Duration(e.cfg.Streaming.StreamIdleTimeoutSeconds) * time.Second
+			idleTimer = time.AfterFunc(idleDur, func() {
+				log.Warnf("[stream_idle_timeout] openai-compat: closing upstream connection after %v idle", idleDur)
+				_ = httpResp.Body.Close()
+			})
+			defer idleTimer.Stop()
+		}
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
 		for scanner.Scan() {
+			if idleTimer != nil {
+				idleTimer.Reset(idleDur)
+			}
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			if detail, ok := helps.ParseOpenAIStreamUsage(line); ok {

@@ -33,6 +33,11 @@ const (
 	openAICompatMultipartMemory       int64 = 32 << 20
 )
 
+var openAICompatForwardedClientHeaders = []string{
+	"X-Session-Affinity",
+	"X-Opencode-Session",
+}
+
 // OpenAICompatExecutor implements a stateless executor for OpenAI-compatible providers.
 // It performs request/response translation and executes against the provider base URL
 // using per-auth credentials (API key) and per-auth HTTP transport (proxy) from context.
@@ -64,6 +69,19 @@ func (e *OpenAICompatExecutor) PrepareRequest(req *http.Request, auth *cliproxya
 	}
 	util.ApplyCustomHeadersFromAttrs(req, attrs)
 	return nil
+}
+
+func applyOpenAICompatForwardedClientHeaders(req *http.Request, headers http.Header) {
+	if req == nil || headers == nil {
+		return
+	}
+	for _, name := range openAICompatForwardedClientHeaders {
+		value := strings.TrimSpace(headers.Get(name))
+		if value == "" {
+			continue
+		}
+		req.Header.Set(name, value)
+	}
 }
 
 // HttpRequest injects OpenAI-compatible credentials into the request and executes it.
@@ -145,6 +163,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	applyOpenAICompatForwardedClientHeaders(httpReq, opts.Headers)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -236,6 +255,7 @@ func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxy
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	applyOpenAICompatForwardedClientHeaders(httpReq, opts.Headers)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -344,6 +364,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	applyOpenAICompatForwardedClientHeaders(httpReq, opts.Headers)
 	httpReq.Header.Set("Accept", "text/event-stream")
 	httpReq.Header.Set("Cache-Control", "no-cache")
 	var authID, authLabel, authType, authValue string
@@ -515,6 +536,7 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	applyOpenAICompatForwardedClientHeaders(httpReq, opts.Headers)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID

@@ -106,6 +106,53 @@ func TestOpenAICompatExecutorPayloadOverrideWinsOverThinkingSuffix(t *testing.T)
 	}
 }
 
+func TestOpenAICompatExecutorForwardsSelectedClientHeaders(t *testing.T) {
+	var gotHeaders http.Header
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeaders = r.Header.Clone()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url":                  server.URL + "/v1",
+		"api_key":                   "test",
+		"header:x-session-affinity": "static-affinity",
+		"header:x-opencode-session": "static-opencode",
+		"header:x-static-only":      "static-value",
+	}}
+	payload := []byte(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}`)
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "glm-5.2",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Stream:       false,
+		Headers: http.Header{
+			"X-Session-Affinity": {"dynamic-affinity"},
+			"X-Opencode-Session": {"dynamic-opencode"},
+			"X-Not-Forwarded":    {"drop-me"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if got := gotHeaders.Get("X-Session-Affinity"); got != "dynamic-affinity" {
+		t.Fatalf("X-Session-Affinity = %q, want dynamic-affinity", got)
+	}
+	if got := gotHeaders.Get("X-Opencode-Session"); got != "dynamic-opencode" {
+		t.Fatalf("X-Opencode-Session = %q, want dynamic-opencode", got)
+	}
+	if got := gotHeaders.Get("X-Static-Only"); got != "static-value" {
+		t.Fatalf("X-Static-Only = %q, want static-value", got)
+	}
+	if got := gotHeaders.Get("X-Not-Forwarded"); got != "" {
+		t.Fatalf("X-Not-Forwarded = %q, want empty", got)
+	}
+}
+
 func TestOpenAICompatExecutorImagesGenerationsPassthrough(t *testing.T) {
 	var gotPath string
 	var gotBody []byte

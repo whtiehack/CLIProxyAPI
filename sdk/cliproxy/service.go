@@ -2645,9 +2645,8 @@ func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {
 		return nil
 	}
 
-	models := registry.WithCodexBuiltins(buildConfigModels(entry.Models, "openai", "openai"))
+	models := buildConfigModels(entry.Models, "openai", "openai")
 	configuredDisplayNames := make(map[string]string, len(entry.Models))
-	seenConfiguredModels := make(map[string]struct{}, len(entry.Models))
 	for i := range entry.Models {
 		model := entry.Models[i]
 		alias := strings.TrimSpace(model.Alias)
@@ -2658,23 +2657,32 @@ func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {
 			continue
 		}
 		key := strings.ToLower(alias)
-		if _, exists := seenConfiguredModels[key]; exists {
-			continue
-		}
-		seenConfiguredModels[key] = struct{}{}
-
 		displayName := strings.TrimSpace(model.DisplayName)
 		if displayName != "" {
 			configuredDisplayNames[key] = displayName
 		}
 	}
-	for _, model := range models {
+
+	builtinsByID := make(map[string]*ModelInfo)
+	for _, builtin := range registry.WithCodexBuiltins(nil) {
+		if builtin == nil {
+			continue
+		}
+		builtinsByID[strings.ToLower(builtin.ID)] = builtin
+	}
+	for i, model := range models {
 		if model == nil {
 			continue
 		}
-		if displayName, ok := configuredDisplayNames[strings.ToLower(model.ID)]; ok {
-			model.DisplayName = displayName
+		key := strings.ToLower(model.ID)
+		builtin, ok := builtinsByID[key]
+		if !ok {
+			continue
 		}
+		if displayName := configuredDisplayNames[key]; displayName != "" {
+			builtin.DisplayName = displayName
+		}
+		models[i] = builtin
 	}
 	return models
 }

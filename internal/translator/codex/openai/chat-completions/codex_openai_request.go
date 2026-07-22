@@ -258,7 +258,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 				// message item below.
 				if role == "assistant" {
 					if rd := m.Get("reasoning_details"); rd.Exists() && rd.IsArray() {
-						out = appendCodexReasoningItemsFromDetails(out, rd.Array())
+						inputItems = appendCodexReasoningItemsFromDetails(inputItems, rd.Array())
 					}
 				}
 
@@ -652,7 +652,7 @@ func buildShortNameMap(names []string) map[string]string {
 // ordering. `reasoning.text` (Anthropic-only variant) is intentionally skipped
 // because Codex has no equivalent field; round-tripping it elsewhere is the
 // caller's responsibility.
-func appendCodexReasoningItemsFromDetails(out []byte, details []gjson.Result) []byte {
+func appendCodexReasoningItemsFromDetails(inputItems [][]byte, details []gjson.Result) [][]byte {
 	type group struct {
 		id        string
 		encrypted string
@@ -719,7 +719,7 @@ func appendCodexReasoningItemsFromDetails(out []byte, details []gjson.Result) []
 			si, _ = sjson.SetBytes(si, "text", s)
 			r, _ = sjson.SetRawBytes(r, "summary.-1", si)
 		}
-		out, _ = sjson.SetRawBytes(out, "input.-1", r)
+		inputItems = append(inputItems, r)
 	}
-	return out
+	return inputItems
 }

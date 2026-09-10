@@ -847,6 +847,19 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						} else {
 							state.NextRetryAfter = now.Add(30 * time.Minute)
 						}
+					} else if result.Error != nil && result.Error.Code == streamStallErrorCode {
+						// A hung upstream returns no status to classify. For api-key relays the
+						// stall is the only health signal there is, so suspend them even when
+						// cooling is disabled. OAuth credentials talk to first-party endpoints
+						// where a stall means a transient upstream hiccup, not a bad account;
+						// keeping them in rotation avoids burning plan quota on idle cooldown.
+						if auth.AuthKind() == AuthKindOAuth {
+							state.NextRetryAfter = time.Time{}
+							state.Unavailable = false
+						} else {
+							state.NextRetryAfter = now.Add(30 * time.Minute)
+							state.Unavailable = true
+						}
 					} else {
 						switch statusCode {
 						case 401, 402, 403:

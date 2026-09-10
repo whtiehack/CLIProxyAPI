@@ -83,4 +83,12 @@ type StreamingConfig struct {
 	// to allow auth rotation / transient recovery.
 	// <= 0 disables bootstrap retries. Default is 0.
 	BootstrapRetries int `yaml:"bootstrap-retries,omitempty" json:"bootstrap-retries,omitempty"`
+
+	// StallTimeoutSeconds bounds how long a streaming request waits for upstream response headers.
+	// On expiry the credential is suspended for 30 minutes (stream_stall). <= 0 disables. Default is 0.
+	StallTimeoutSeconds int `yaml:"stall-timeout-seconds,omitempty" json:"stall-timeout-seconds,omitempty"`
+
+	// StreamIdleTimeoutSeconds bounds the gap between upstream bytes while streaming; on expiry the
+	// upstream connection is closed and the failure is reported as stream_stall. <= 0 disables. Default is 0.
+	StreamIdleTimeoutSeconds int `yaml:"stream-idle-timeout-seconds,omitempty" json:"stream-idle-timeout-seconds,omitempty"`
 }

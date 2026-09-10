@@ -21,6 +21,13 @@ const connectionLifecycleErrorCode = ErrorCodeConnectionLifecycle
 // ErrorCodeForceCooldown marks failures that must enforce credential cooldown.
 const ErrorCodeForceCooldown = "force_cooldown"
 
+// ErrorCodeStreamStall marks an upstream that accepted a streaming request but
+// produced no bytes within the configured stall window. API-key relays are
+// suspended for 30 minutes; OAuth credentials stay in rotation.
+const ErrorCodeStreamStall = "stream_stall"
+
+const streamStallErrorCode = ErrorCodeStreamStall
+
 // Error describes an authentication related failure in a provider agnostic format.
 type Error struct {
 	// Code is a short machine readable identifier.
